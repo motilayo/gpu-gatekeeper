@@ -235,6 +235,10 @@ func main() {
 	draClaimsURL := flag.String("dra-claims-url", "", "HTTPS URL returning Kubernetes resource.k8s.io/v1 ResourceClaimList JSON")
 	draClaimsFile := flag.String("dra-claims-file", "", "Path to local JSON file with Kubernetes ResourceClaimList format")
 	cdiDir := flag.String("cdi-dir", "/var/run/cdi", "Path to directory for Container Device Interface (CDI) JSON specs")
+	draSock := flag.String("dra-sock", "", "Path to UNIX domain socket for DRA NodePrepareResources / NodeUnprepareResources RPC server")
+	nodeName := flag.String("node-name", os.Getenv("NODE_NAME"), "Node name for Kubernetes DRA ResourceSlice publishing")
+	draSliceURL := flag.String("dra-slice-url", "", "HTTPS URL for Kubernetes API server to publish node ResourceSlice")
+	draSliceFile := flag.String("dra-slice-file", "", "Path to local file where node ResourceSlice JSON should be written")
 	flag.Parse()
 
 	defaultVramPolicy := k8s.ParseVRAMPolicy(*vramPolicyStr)
@@ -317,11 +321,54 @@ func main() {
 	resolver := k8s.NewResolver(objs.CgroupQuotaMap, *kubeletPodsURL, *kubeletPodsFile, *kubeletTokenFile)
 	resolver.SetDefaultVRAMPolicy(defaultVramPolicy)
 	resolver.SetDRAClaimsSource(*draClaimsURL, *draClaimsFile)
-	if *cdiDir != "" {
-		draDriver := dra.NewDriver(*cdiDir)
+
+	var draDriver *dra.Driver
+	if *cdiDir != "" || *draSock != "" {
+		draDriver = dra.NewDriver(*cdiDir)
 		resolver.SetDRADriver(draDriver)
 		log.Printf("Initialized DRA driver with CDI spec directory: %s", *cdiDir)
 	}
+
+	if draDriver != nil && *draSock != "" {
+		stopSock, err := draDriver.StartSocketServer(*draSock)
+		if err != nil {
+			log.Fatalf("starting DRA socket server on %s: %v", *draSock, err)
+		}
+		defer func() {
+			_ = stopSock()
+		}()
+		log.Printf("Started DRA UNIX socket server on %s", *draSock)
+	}
+
+	defaultTokensCap := uint64(400000)
+	defaultMemCap := uint64(16 * 1024 * 1024 * 1024) // 16 GiB
+	effectiveNodeName := *nodeName
+	if effectiveNodeName == "" {
+		effectiveNodeName = "localhost"
+	}
+
+	if *draSliceFile != "" {
+		if err := dra.WriteResourceSliceFile(*draSliceFile, effectiveNodeName, defaultTokensCap, defaultMemCap); err != nil {
+			log.Printf("warning: failed to write ResourceSlice file %s: %v", *draSliceFile, err)
+		} else {
+			log.Printf("Published local DRA ResourceSlice file: %s (node: %s)", *draSliceFile, effectiveNodeName)
+		}
+	}
+
+	if *draSliceURL != "" && *nodeName != "" {
+		var token string
+		if *kubeletTokenFile != "" {
+			if data, err := os.ReadFile(*kubeletTokenFile); err == nil {
+				token = strings.TrimSpace(string(data))
+			}
+		}
+		if err := dra.PublishResourceSliceHTTP(*draSliceURL, token, *nodeName, defaultTokensCap, defaultMemCap); err != nil {
+			log.Printf("warning: failed to publish ResourceSlice to %s: %v", *draSliceURL, err)
+		} else {
+			log.Printf("Published DRA ResourceSlice to Kubernetes API: %s (node: %s)", *draSliceURL, *nodeName)
+		}
+	}
+
 	resolverCtx, resolverCancel := context.WithCancel(context.Background())
 	defer resolverCancel()
 	go resolver.Start(resolverCtx, 100*time.Millisecond)

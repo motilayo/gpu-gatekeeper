@@ -1,11 +1,19 @@
 package dra
 
 import (
+	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -53,6 +61,43 @@ type CDIContainerEdit struct {
 type CDIDeviceNode struct {
 	Path     string `json:"path"`
 	HostPath string `json:"hostPath,omitempty"`
+}
+
+// ClaimPrepareItem represents a single claim in a NodePrepareResources request.
+type ClaimPrepareItem struct {
+	UID          string `json:"uid"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	DeviceID     string `json:"deviceID,omitempty"`
+	TokensPerSec uint64 `json:"tokensPerSec"`
+	BurstTokens  uint64 `json:"burstTokens"`
+	MaxVramBytes uint64 `json:"maxVramBytes"`
+	VRAMPolicy   string `json:"vramPolicy,omitempty"`
+}
+
+// NodePrepareRequest represents the request body for /v1/NodePrepareResources.
+type NodePrepareRequest struct {
+	Claims []ClaimPrepareItem `json:"claims"`
+}
+
+// ClaimPrepareResult represents the preparation result for a single claim.
+type ClaimPrepareResult struct {
+	CDIDevices []string `json:"cdiDevices"`
+}
+
+// NodePrepareResponse represents the response body for /v1/NodePrepareResources.
+type NodePrepareResponse struct {
+	Claims map[string]ClaimPrepareResult `json:"claims"`
+}
+
+// NodeUnprepareRequest represents the request body for /v1/NodeUnprepareResources.
+type NodeUnprepareRequest struct {
+	ClaimUIDs []string `json:"claimUIDs"`
+}
+
+// NodeUnprepareResponse represents the response body for /v1/NodeUnprepareResources.
+type NodeUnprepareResponse struct {
+	Unprepared []string `json:"unprepared"`
 }
 
 // Driver manages DRA NodePrepareResource / NodeUnprepareResource operations
@@ -122,6 +167,223 @@ func (d *Driver) GetPreparedClaimByName(namespace, claimName string) (PreparedCl
 		}
 	}
 	return PreparedClaim{}, false
+}
+
+// StartSocketServer starts a UNIX domain socket server listening for DRA RPC calls.
+// It returns a cleanup function to gracefully shut down the server and remove the socket file.
+func (d *Driver) StartSocketServer(sockPath string) (func() error, error) {
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0755); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(sockPath)
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return nil, fmt.Errorf("listen unix %s: %w", sockPath, err)
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/v1/NodePrepareResources", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req NodePrepareRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		resp := NodePrepareResponse{
+			Claims: make(map[string]ClaimPrepareResult),
+		}
+
+		for _, item := range req.Claims {
+			uid := item.UID
+			if uid == "" {
+				uid = item.Name
+			}
+			claim := PreparedClaim{
+				ClaimUID:     uid,
+				ClaimName:    item.Name,
+				Namespace:    item.Namespace,
+				DeviceID:     item.DeviceID,
+				TokensPerSec: item.TokensPerSec,
+				BurstTokens:  item.BurstTokens,
+				MaxVramBytes: item.MaxVramBytes,
+				VRAMPolicy:   item.VRAMPolicy,
+			}
+			cdiDeviceID, err := d.NodePrepareResource(claim)
+			if err != nil {
+				http.Error(w, fmt.Sprintf("failed to prepare claim %s: %v", uid, err), http.StatusInternalServerError)
+				return
+			}
+			resp.Claims[uid] = ClaimPrepareResult{
+				CDIDevices: []string{cdiDeviceID},
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	mux.HandleFunc("/v1/NodeUnprepareResources", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req NodeUnprepareRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		resp := NodeUnprepareResponse{
+			Unprepared: make([]string, 0, len(req.ClaimUIDs)),
+		}
+
+		for _, uid := range req.ClaimUIDs {
+			_ = d.NodeUnprepareResource(uid)
+			resp.Unprepared = append(resp.Unprepared, uid)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	srv := &http.Server{
+		Handler: mux,
+	}
+
+	go func() {
+		_ = srv.Serve(listener)
+	}()
+
+	cleanup := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		_ = listener.Close()
+		_ = os.Remove(sockPath)
+		return nil
+	}
+
+	return cleanup, nil
+}
+
+// BuildResourceSlice generates a Kubernetes 1.34 resource.k8s.io/v1 ResourceSlice object structure.
+func BuildResourceSlice(nodeName string, capacityTokensPerSec uint64, capacityMemoryBytes uint64) map[string]interface{} {
+	return map[string]interface{}{
+		"apiVersion": "resource.k8s.io/v1",
+		"kind":       "ResourceSlice",
+		"metadata": map[string]interface{}{
+			"name": fmt.Sprintf("%s-gpu-g-gate-io", nodeName),
+		},
+		"spec": map[string]interface{}{
+			"nodeName": nodeName,
+			"driver":   DriverName,
+			"pool": map[string]interface{}{
+				"name":               nodeName,
+				"generation":         1,
+				"resourceSliceCount": 1,
+			},
+			"devices": []map[string]interface{}{
+				{
+					"name": "gpu-0",
+					"basic": map[string]interface{}{
+						"capacity": map[string]interface{}{
+							"gpu.g-gate.io/tokens-per-sec": fmt.Sprintf("%d", capacityTokensPerSec),
+							"gpu.g-gate.io/burst-tokens":  fmt.Sprintf("%d", capacityTokensPerSec),
+							"memory":                      fmt.Sprintf("%dMi", capacityMemoryBytes/(1024*1024)),
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// WriteResourceSliceFile serializes the ResourceSlice JSON to the specified file path.
+func WriteResourceSliceFile(path, nodeName string, capacityTokensPerSec, capacityMemoryBytes uint64) error {
+	slice := BuildResourceSlice(nodeName, capacityTokensPerSec, capacityMemoryBytes)
+	data, err := json.MarshalIndent(slice, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// PublishResourceSliceHTTP publishes the ResourceSlice JSON to the Kubernetes API server endpoint via POST or PUT.
+func PublishResourceSliceHTTP(apiURL, bearerToken, nodeName string, capacityTokensPerSec, capacityMemoryBytes uint64) error {
+	slice := BuildResourceSlice(nodeName, capacityTokensPerSec, capacityMemoryBytes)
+	data, err := json.Marshal(slice)
+	if err != nil {
+		return err
+	}
+
+	targetURL := apiURL
+	if !strings.Contains(targetURL, "/apis/resource.k8s.io/v1/resourceslices") {
+		targetURL = strings.TrimRight(targetURL, "/") + "/apis/resource.k8s.io/v1/resourceslices"
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		Timeout: 10 * time.Second,
+	}
+
+	req, err := http.NewRequest(http.MethodPost, targetURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		// Already exists; update via PUT
+		sliceName := fmt.Sprintf("%s-gpu-g-gate-io", nodeName)
+		putURL := fmt.Sprintf("%s/%s", strings.TrimRight(targetURL, "/"), sliceName)
+		putReq, err := http.NewRequest(http.MethodPut, putURL, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		putReq.Header.Set("Content-Type", "application/json")
+		if bearerToken != "" {
+			putReq.Header.Set("Authorization", "Bearer "+bearerToken)
+		}
+		putResp, err := client.Do(putReq)
+		if err != nil {
+			return err
+		}
+		defer putResp.Body.Close()
+		if putResp.StatusCode >= 300 {
+			body, _ := io.ReadAll(putResp.Body)
+			return fmt.Errorf("PUT ResourceSlice returned %d: %s", putResp.StatusCode, string(body))
+		}
+		return nil
+	}
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("POST ResourceSlice returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
 
 func (d *Driver) writeCDISpecLocked() error {

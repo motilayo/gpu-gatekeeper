@@ -20,6 +20,7 @@ CGROUP_M5="/sys/fs/cgroup/kubepods-pod11111111_2222_3333_4444_555555555555-abcde
 CGROUP_M9="/sys/fs/cgroup/ggate-e2e-m9"
 CGROUP_DRA="/sys/fs/cgroup/kubepods-poddra111111_2222_3333_4444_555555555555-abcdef987654"
 CGROUP_M12="/sys/fs/cgroup/ggate-e2e-m12"
+CGROUP_M13="/sys/fs/cgroup/kubepods-podm131111_2222_3333_4444_555555555555-m13container123"
 
 cleanup() {
     echo "=== Running cleanup ==="
@@ -38,6 +39,8 @@ cleanup() {
     rmdir "${CGROUP_M9}" 2>/dev/null || true
     rmdir "${CGROUP_DRA}" 2>/dev/null || true
     rmdir "${CGROUP_M12}" 2>/dev/null || true
+    rmdir "${CGROUP_M13}" 2>/dev/null || true
+    rm -rf /tmp/ggate_cdi_* /tmp/ggate_dra.sock /tmp/ggate_resource_slice.json /tmp/mock_dra_pods_m13.json
     rm -f /tmp/ggate_agent_*.log /tmp/sim_*.log /tmp/mock_kubelet_pods.json /tmp/mock_dra_*.json
 }
 trap cleanup EXIT
@@ -773,5 +776,174 @@ AGENT_PID=""
 rmdir "${CGROUP_M12}" 2>/dev/null || true
 
 echo "=========================================================="
-echo "ALL LOCAL E2E MILESTONES (1, 2, 3, 4, 5, 9, 11, 12) VERIFIED SUCCESSFULLY!"
+echo "Milestone 13 (v0.5): Kubelet DRA Unix Socket (NodePrepareResources / NodeUnprepareResources) & ResourceSlice Publisher"
+echo "=========================================================="
+rm -rf /tmp/ggate_cdi_m13 /tmp/ggate_dra.sock /tmp/ggate_resource_slice.json /tmp/mock_dra_pods_m13.json
+rmdir "${CGROUP_M13}" 2>/dev/null || true
+
+cat << 'EOF' > /tmp/mock_dra_pods_m13.json
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "vllm-dra-m13-pod",
+        "namespace": "ai-prod",
+        "uid": "m131111-2222-3333-4444-555555555555",
+        "annotations": {}
+      },
+      "status": {
+        "containerStatuses": [
+          {
+            "name": "vllm",
+            "containerID": "containerd://m13container123"
+          }
+        ],
+        "resourceClaimStatuses": [
+          {
+            "name": "gpu",
+            "resourceClaimName": "vllm-dra-claim-m13"
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
+
+echo "Starting ggate-agent with DRA socket, ResourceSlice file, CDI dir, and zero CLI claims..."
+./build/ggate-agent \
+    --libcuda ./build/libcuda.so \
+    --metrics-addr :9090 \
+    --kubelet-pods-file /tmp/mock_dra_pods_m13.json \
+    --cdi-dir /tmp/ggate_cdi_m13 \
+    --dra-sock /tmp/ggate_dra.sock \
+    --dra-slice-file /tmp/ggate_resource_slice.json \
+    --node-name ggate-node-01 \
+    > /tmp/ggate_agent_m13.log 2>&1 &
+AGENT_PID=$!
+
+echo "Waiting for ggate-agent and DRA Unix socket to start..."
+READY=0
+for i in {1..50}; do
+    if curl -s http://localhost:9090/metrics >/dev/null 2>&1 && [ -S "/tmp/ggate_dra.sock" ]; then
+        READY=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "${READY}" -ne 1 ]; then
+    echo "FAIL: ggate-agent failed to start for Milestone 13. Logs:"
+    cat /tmp/ggate_agent_m13.log
+    exit 1
+fi
+
+# Verify ResourceSlice file was published
+if [ ! -f "/tmp/ggate_resource_slice.json" ]; then
+    echo "FAIL: Expected ResourceSlice file at /tmp/ggate_resource_slice.json"
+    exit 1
+fi
+if ! grep -q '"kind": "ResourceSlice"' /tmp/ggate_resource_slice.json; then
+    echo "FAIL: Expected kind ResourceSlice in /tmp/ggate_resource_slice.json"
+    cat /tmp/ggate_resource_slice.json
+    exit 1
+fi
+if ! grep -q '"driver": "gpu.g-gate.io"' /tmp/ggate_resource_slice.json; then
+    echo "FAIL: Expected driver gpu.g-gate.io in /tmp/ggate_resource_slice.json"
+    cat /tmp/ggate_resource_slice.json
+    exit 1
+fi
+if ! grep -q '"nodeName": "ggate-node-01"' /tmp/ggate_resource_slice.json; then
+    echo "FAIL: Expected nodeName ggate-node-01 in /tmp/ggate_resource_slice.json"
+    cat /tmp/ggate_resource_slice.json
+    exit 1
+fi
+echo "  -> Verified ResourceSlice generated with driver=gpu.g-gate.io and nodeName=ggate-node-01"
+
+# Dynamically prepare resource over Unix domain socket
+echo "Sending NodePrepareResources request over /tmp/ggate_dra.sock..."
+PREP_RESP=$(curl -s --unix-socket /tmp/ggate_dra.sock -X POST http://localhost/v1/NodePrepareResources \
+    -H "Content-Type: application/json" \
+    -d '{"claims":[{"uid":"m13-claim-uid","name":"vllm-dra-claim-m13","namespace":"ai-prod","tokensPerSec":6400,"burstTokens":64,"maxVramBytes":33554432,"vramPolicy":"audit"}]}')
+
+echo "NodePrepareResources response: ${PREP_RESP}"
+if ! echo "${PREP_RESP}" | grep -q "gpu.g-gate.io/gpu=claim-m13-claim-uid"; then
+    echo "FAIL: Expected cdiDevice gpu.g-gate.io/gpu=claim-m13-claim-uid in response"
+    exit 1
+fi
+
+if [ ! -f "/tmp/ggate_cdi_m13/gpu.g-gate.io.json" ]; then
+    echo "FAIL: Expected CDI spec at /tmp/ggate_cdi_m13/gpu.g-gate.io.json"
+    exit 1
+fi
+if ! grep -q "claim-m13-claim-uid" /tmp/ggate_cdi_m13/gpu.g-gate.io.json; then
+    echo "FAIL: Expected claim-m13-claim-uid in CDI spec"
+    cat /tmp/ggate_cdi_m13/gpu.g-gate.io.json
+    exit 1
+fi
+echo "  -> Verified CDI specification contains claim-m13-claim-uid"
+
+# Create container cgroup AFTER NodePrepareResources (proving lifecycle ordering)
+echo "Creating container cgroup ${CGROUP_M13} after NodePrepareResources..."
+mkdir -p "${CGROUP_M13}"
+sleep 0.3
+
+echo "Running workload_sim in Milestone 13 DRA cgroup (duration=3s)..."
+(echo $BASHPID > "${CGROUP_M13}/cgroup.procs" && ./build/workload_sim -n 0 -duration 3) > /tmp/sim_m13.log 2>&1
+
+cat /tmp/sim_m13.log
+IOPS_M13=$(grep -o 'iops=[0-9.]*' /tmp/sim_m13.log | cut -d'=' -f2)
+CGROUP_ID_M13=$(grep -o 'cgroup_id=[0-9]*' /tmp/sim_m13.log | cut -d'=' -f2)
+
+echo "Achieved Milestone 13 IOPS: ${IOPS_M13} (target: 200.0 from tokens-per-sec=6400, expected [185.0, 215.0])"
+
+awk -v iops="${IOPS_M13}" 'BEGIN {
+    if (iops >= 185.0 && iops <= 215.0) {
+        printf("  -> Milestone 13 IOPS %.2f is within bounds [185.0, 215.0]\n", iops);
+        exit 0;
+    } else {
+        printf("FAIL: Milestone 13 IOPS %.2f is out of bounds [185.0, 215.0]\n", iops);
+        exit 1;
+    }
+}'
+
+sleep 0.2
+METRICS=$(curl -s http://localhost:9090/metrics)
+echo "Scraped Milestone 13 Pod metrics:"
+echo "${METRICS}" | grep "vllm-dra-m13-pod" || true
+
+POD_METRIC_M13=$(echo "${METRICS}" | grep 'namespace="ai-prod"' | grep 'pod="vllm-dra-m13-pod"' | grep 'resource_claim="vllm-dra-claim-m13"' || true)
+if [ -z "${POD_METRIC_M13}" ]; then
+    echo "FAIL: Missing expected Kubernetes metric with resource_claim=vllm-dra-claim-m13"
+    exit 1
+fi
+
+# Dynamically unprepare resource over Unix domain socket
+echo "Sending NodeUnprepareResources request over /tmp/ggate_dra.sock..."
+UNPREP_RESP=$(curl -s --unix-socket /tmp/ggate_dra.sock -X POST http://localhost/v1/NodeUnprepareResources \
+    -H "Content-Type: application/json" \
+    -d '{"claimUIDs":["m13-claim-uid"]}')
+
+echo "NodeUnprepareResources response: ${UNPREP_RESP}"
+if ! echo "${UNPREP_RESP}" | grep -q "m13-claim-uid"; then
+    echo "FAIL: Expected m13-claim-uid in unprepare response"
+    exit 1
+fi
+
+if grep -q "claim-m13-claim-uid" /tmp/ggate_cdi_m13/gpu.g-gate.io.json 2>/dev/null; then
+    echo "FAIL: claim-m13-claim-uid should have been removed from CDI spec"
+    cat /tmp/ggate_cdi_m13/gpu.g-gate.io.json
+    exit 1
+fi
+echo "  -> Verified claim-m13-claim-uid successfully removed from CDI specification upon unprepare"
+
+echo "[PASS] Milestone 13 (v0.5) verified successfully (Kubelet DRA Unix Socket NodePrepare/NodeUnprepare RPC + ResourceSlice publishing)."
+
+kill -TERM "${AGENT_PID}"
+wait "${AGENT_PID}" 2>/dev/null || true
+AGENT_PID=""
+rmdir "${CGROUP_M13}" 2>/dev/null || true
+rm -rf /tmp/ggate_cdi_m13 /tmp/ggate_dra.sock /tmp/ggate_resource_slice.json /tmp/mock_dra_pods_m13.json
+
+echo "=========================================================="
+echo "ALL LOCAL E2E MILESTONES (1, 2, 3, 4, 5, 9, 11, 12, 13) VERIFIED SUCCESSFULLY!"
 echo "=========================================================="

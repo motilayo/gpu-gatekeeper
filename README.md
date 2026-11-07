@@ -67,6 +67,7 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 - **Active VRAM Quota Enforcement Policies (`audit | throttle | kill`):** Configurable via `--vram-policy`, Pod annotation (`g-gate.io/vram-policy`), or DRA claim parameters. Supports passive `audit` logging, QoS micro-slicing `throttle` (`SIGSTOP`/`SIGCONT`), or hard process termination via `kill` (`SIGKILL`) upon VRAM quota violation.
 - **Driver Auto-Discovery (`--libcuda=auto`):** Automatically locates active NVIDIA driver libraries across container runtimes, GPU Operator paths, and host filesystems.
 - **Native Kubernetes DRA Support (`resource.k8s.io/v1`):** Native Dynamic Resource Allocation driver and controller that auto-discovers bound `ResourceClaim` objects, parses consumed capacity shares and VRAM limits, and generates Container Device Interface (CDI 0.6.0) device specifications with zero Pod annotations required.
+- **Kubelet DRA Unix Socket Server & ResourceSlice Publisher:** Exposes `/v1/NodePrepareResources` and `/v1/NodeUnprepareResources` RPCs over a local UNIX domain socket for dynamic claim lifecycle injection, and publishes node `ResourceSlice` (`resource.k8s.io/v1`) specifications directly to the cluster API or local runtime.
 - **Kubernetes Pod Label Resolution:** Correlates cgroup v2 inodes with Kubelet HTTPS (`:10250/pods`) using ServiceAccount Bearer token authentication, enriching Prometheus metrics with `namespace`, `pod`, and `container` labels.
 - **Pod Annotation Quotas:** Declare GPU compute and VRAM quotas directly on Pod manifests using `g-gate.io/tokens-per-sec`, `g-gate.io/burst-tokens`, `g-gate.io/max-vram-mb`, and `g-gate.io/vram-policy` annotations with zero agent restarts.
 - **Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 50 ms ceiling (`MAX_PAUSE_NS`) to prevent process starvation or Kubernetes probe timeouts.
@@ -106,7 +107,7 @@ To run the live k3s integration test (requires root / k3s inside Linux):
 make test-k3s
 ```
 
-### Complete 12-Milestone Engineering & Verification Progression
+### Complete 13-Milestone Engineering & Verification Progression
 
 | Milestone | Scope | Verification Target |
 | :--- | :--- | :--- |
@@ -122,6 +123,7 @@ make test-k3s
 | **Milestone 10** | **Third-Party Validation & Reproducibility Suite (`benchmarks/`):** Multi-trial statistical benchmark suite (`N=5` / `N=3`) on an AWS `g4dn.xlarge` Tesla T4 covering attribution overhead (`+2.40 µs`), 50/50 (`99.98%`), 20/80 (`99.57%`), 10/30/60 (`99.92%`), CUDA Graph replay (`99.65%`), and VRAM lifecycle (`0-drift`). | `./benchmarks/run-validation-suite.sh` |
 | **Milestone 11 (`v0.3`)** | **Native Kubernetes DRA (`resource.k8s.io/v1`) & CDI `0.6.0` Driver:** Validates `ResourceClaim` discovery (`v1` + `v1beta1` fallback), `NodePrepareResources` lifecycle cache ordering, hardware-safe CDI `0.6.0` spec generation, `resource_claim` metric labeling, and zero-annotation quota enforcement. | `make test-e2e` & `make test-unit` |
 | **Milestone 12 (`v0.4`)** | **Dynamic CUDA Graph Costing & Active VRAM Policy (`kill`):** Intercepts `cuGraphAddKernelNode` & `cuGraphInstantiate` to dynamically cost constituent graph nodes (`50.0` replays/sec on 4-node graph), enforces active VRAM `kill` policy via immediate `SIGKILL` termination, and patches Dependabot security alerts. | `make test-e2e` & `make test-unit` |
+| **Milestone 13 (`v0.5`)** | **DRA Unix Domain Socket RPC & `ResourceSlice` Publisher:** Implements `/v1/NodePrepareResources` & `/v1/NodeUnprepareResources` over Kubelet UNIX socket, automates `ResourceSlice` manifest publishing to Kubernetes API / disk, and provides a multi-arch release pipeline (`.github/workflows/release.yml`). | `make test-e2e` & `make test-unit` |
 
 ### Build Targets
 
@@ -228,6 +230,10 @@ See [deploy/kubernetes/dra-example.yaml](deploy/kubernetes/dra-example.yaml) for
 | `--dra-claims-url` | `""` | HTTPS URL returning Kubernetes `resource.k8s.io/v1` `ResourceClaimList` JSON |
 | `--dra-claims-file` | `""` | Path to local JSON file with Kubernetes `ResourceClaimList` format |
 | `--cdi-dir` | `"/var/run/cdi"` | Path to directory for Container Device Interface (CDI 0.6.0) JSON specs |
+| `--dra-sock` | `""` | Path to UNIX domain socket for DRA NodePrepareResources / NodeUnprepareResources RPC server |
+| `--node-name` | `""` | Node name for Kubernetes DRA `ResourceSlice` publishing |
+| `--dra-slice-url` | `""` | HTTPS URL for Kubernetes API server to publish node `ResourceSlice` |
+| `--dra-slice-file` | `""` | Path to local file where node `ResourceSlice` JSON should be written |
 
 The `<target>` for `--quota` can be:
 - A numeric cgroup inode: `--quota 12345:6400:64` (or `--quota 12345:6400:64:33554432`)

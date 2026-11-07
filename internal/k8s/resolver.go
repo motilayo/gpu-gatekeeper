@@ -520,6 +520,9 @@ func (r *Resolver) SyncOnce() {
 								refillRate = prep.TokensPerSec
 								maxBurst = prep.BurstTokens
 								maxVramBytes = prep.MaxVramBytes
+								if prep.VRAMPolicy != "" {
+									vramPolicy = ParseVRAMPolicy(prep.VRAMPolicy)
+								}
 								break
 							} else if prep, ok := r.draDriver.GetPreparedClaim(rcs.ResourceClaimName); ok {
 								boundClaimName = prep.ClaimName
@@ -527,6 +530,9 @@ func (r *Resolver) SyncOnce() {
 								refillRate = prep.TokensPerSec
 								maxBurst = prep.BurstTokens
 								maxVramBytes = prep.MaxVramBytes
+								if prep.VRAMPolicy != "" {
+									vramPolicy = ParseVRAMPolicy(prep.VRAMPolicy)
+								}
 								break
 							}
 						}
@@ -540,6 +546,9 @@ func (r *Resolver) SyncOnce() {
 									refillRate = prep.TokensPerSec
 									maxBurst = prep.BurstTokens
 									maxVramBytes = prep.MaxVramBytes
+									if prep.VRAMPolicy != "" {
+										vramPolicy = ParseVRAMPolicy(prep.VRAMPolicy)
+									}
 									break
 								} else if prep, ok := r.draDriver.GetPreparedClaim(rc.ResourceClaimName); ok {
 									boundClaimName = prep.ClaimName
@@ -547,6 +556,9 @@ func (r *Resolver) SyncOnce() {
 									refillRate = prep.TokensPerSec
 									maxBurst = prep.BurstTokens
 									maxVramBytes = prep.MaxVramBytes
+									if prep.VRAMPolicy != "" {
+										vramPolicy = ParseVRAMPolicy(prep.VRAMPolicy)
+									}
 									break
 								}
 							}
