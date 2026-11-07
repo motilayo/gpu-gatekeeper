@@ -497,7 +497,7 @@ AGENT_PID=""
 rmdir "${CGROUP_M9}" 2>/dev/null || true
 
 echo "=========================================================="
-echo "Milestone 10 (v0.3): Native Kubernetes DRA (resource.k8s.io/v1) ResourceClaim Enforcement"
+echo "Milestone 11 (v0.3): Native Kubernetes DRA (resource.k8s.io/v1) ResourceClaim Enforcement"
 echo "=========================================================="
 rmdir "${CGROUP_DRA}" 2>/dev/null || true
 
@@ -661,7 +661,7 @@ echo "Verified CDI 0.6.0 spec generated at /tmp/ggate_cdi_test/gpu.g-gate.io.jso
 cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
 rm -rf /tmp/ggate_cdi_test
 
-echo "[PASS] Milestone 10 (v0.3) verified successfully (Kubernetes DRA ResourceClaim quota enforcement + CDI 0.6.0 spec generation with ZERO annotations)."
+echo "[PASS] Milestone 11 (v0.3) verified successfully (Kubernetes DRA ResourceClaim quota enforcement + CDI 0.6.0 spec generation with ZERO annotations)."
 
 kill -TERM "${AGENT_PID}"
 wait "${AGENT_PID}" 2>/dev/null || true
@@ -669,5 +669,5 @@ AGENT_PID=""
 rmdir "${CGROUP_DRA}" 2>/dev/null || true
 
 echo "=========================================================="
-echo "ALL MILESTONES (1, 2, 3, 4, 5, 9, 10) VERIFIED SUCCESSFULLY!"
+echo "ALL LOCAL E2E MILESTONES (1, 2, 3, 4, 5, 9, 11) VERIFIED SUCCESSFULLY!"
 echo "=========================================================="

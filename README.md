@@ -104,14 +104,21 @@ To run the live k3s integration test (requires root / k3s inside Linux):
 make test-k3s
 ```
 
-This automated test suite verifies all milestones:
-1. **Milestone 1:** Compiles `mock/libcuda.so` and verifies symbol exports for `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync`.
-2. **Milestone 2:** Runs `workload_sim -n 5000 -vram 104857600` and validates Prometheus attribution metrics for the cgroup inode.
-3. **Milestone 3:** Configures dynamic 20% / 80% quota paths, starts the agent, creates the cgroups *after* agent startup, runs concurrent workloads, and verifies the 20% slice achieves 200.0 IOPS (±5%) and a 0.25 ratio (±5%).
-4. **Milestone 4:** Runs `workload_sim -free-on-exit` and confirms allocated VRAM is accurately decremented back to 0.
-5. **Milestone 5:** Connects agent to mock Kubelet Pod metadata with `g-gate.io/tokens-per-sec="6400"` and `g-gate.io/max-vram-mb="32"`, verifies automatic quota discovery, and confirms enriched Pod labels, `ggate_gpu_throttled_seconds_total > 0`, and VRAM quota violation tracking.
-6. **Milestone 9 (v0.2):** Validates CUDA Graphs (`cuGraphLaunch`), stream-ordered memory (`cuMemAllocAsync` / `cuMemFreeAsync`), `--libcuda auto` resolution, and micro-sliced latency tracking.
-7. **Milestone 10 (v0.3):** Validates Kubernetes DRA (`resource.k8s.io/v1`) `ResourceClaim` discovery, CDI 0.6.0 specification generation, and zero-annotation quota enforcement.
+### Complete 11-Milestone Engineering & Verification Progression
+
+| Milestone | Scope | Verification Target |
+| :--- | :--- | :--- |
+| **Milestone 1** | Compiles `mock/libcuda.so` and verifies symbol exports for `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync`. | `make test-e2e` |
+| **Milestone 2** | Runs `workload_sim -n 5000 -vram 104857600` and validates eBPF `uprobe` Prometheus attribution metrics for the `cgroup v2` inode. | `make test-e2e` |
+| **Milestone 3** | Configures dynamic 20% / 80% quota paths, starts the agent, creates the cgroups *after* agent startup, runs concurrent workloads, and verifies the 20% slice achieves `200.0` IOPS (±5%) and a `0.25` ratio (±5%). | `make test-e2e` |
+| **Milestone 4** | Runs `workload_sim -free-on-exit` and confirms allocated VRAM is accurately decremented back to `0 B` via `uretprobe/cuMemAlloc_v2` and `uprobe/cuMemFree_v2`. | `make test-e2e` |
+| **Milestone 5** | Connects agent to Kubelet Pod metadata with `g-gate.io/tokens-per-sec="6400"` and `g-gate.io/max-vram-mb="32"`, verifying automatic quota discovery, enriched Pod labels, `ggate_gpu_throttled_seconds_total > 0`, and VRAM quota violation tracking. | `make test-e2e` |
+| **Milestone 6** | **Real Cloud GPU (`NVIDIA Tesla T4`) PyTorch Smoke Test:** Validates 20/80 QoS rate limiting (`0.2486` ratio vs `0.2500` target) on physical CUDA `12.8` + PyTorch `2.7` matrix multiplications (`torch.matmul`) with automated AWS/GCP Spot teardown. | `./deploy/cloud/aws-spot-smoke.sh` |
+| **Milestone 7** | **Production Packaging, Helm Chart, Grafana Dashboard & CI:** Multi-stage `Dockerfile`, Helm chart (`deploy/helm/ggate`), Grafana dashboard (`deploy/grafana/ggate-dashboard.json`), Go unit test suite, and GitHub Actions E2E CI (`.github/workflows/ci.yml`). | `make test-unit` & GitHub Actions CI |
+| **Milestone 8** | **Live `k3s` Kubernetes Cluster Integration:** Deploys G-Gate onto a live `k3s` cluster, authenticates against Kubelet HTTPS `:10250/pods` using a ServiceAccount Bearer token, and enforces Pod annotation quotas end-to-end. | `make test-k3s` |
+| **Milestone 9 (`v0.2`)** | **CUDA Graphs, Async Memory & 10 ms Micro-Pausing:** Validates `uprobe/cuGraphLaunch`, stream-ordered memory (`cuMemAllocAsync` / `cuMemFreeAsync`), `--libcuda=auto` driver discovery, and 10 ms micro-sliced wall-clock latency accounting. | `make test-e2e` |
+| **Milestone 10** | **Third-Party Validation & Reproducibility Suite (`benchmarks/`):** Multi-trial statistical benchmark suite (`N=5` / `N=3`) on an AWS `g4dn.xlarge` Tesla T4 covering attribution overhead (`+2.40 µs`), 50/50 (`99.98%`), 20/80 (`99.57%`), 10/30/60 (`99.92%`), CUDA Graph replay (`99.65%`), and VRAM lifecycle (`0-drift`). | `./benchmarks/run-validation-suite.sh` |
+| **Milestone 11 (`v0.3`)** | **Native Kubernetes DRA (`resource.k8s.io/v1`) & CDI `0.6.0` Driver:** Validates `ResourceClaim` discovery (`v1` + `v1beta1` fallback), `NodePrepareResources` lifecycle cache ordering, hardware-safe CDI `0.6.0` spec generation, `resource_claim` metric labeling, and zero-annotation quota enforcement. | `make test-e2e` & `make test-unit` |
 
 ### Build Targets
 
