@@ -25,6 +25,14 @@ struct pt_regs_x86 {
     unsigned long ss;
 };
 #define __PT_REGS_CAST(x) ((const struct pt_regs_x86 *)(x))
+#elif defined(__TARGET_ARCH_arm64)
+#define user_pt_regs user_pt_regs_arm64
+struct user_pt_regs_arm64 {
+    __u64 regs[31];
+    __u64 sp;
+    __u64 pc;
+    __u64 pstate;
+};
 #endif
 
 #include <bpf/bpf_helpers.h>
