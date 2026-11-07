@@ -8,7 +8,7 @@ endif
 CC ?= clang
 CFLAGS ?= -O2 -g -Wall
 
-.PHONY: all build-mock generate build-agent test-e2e clean
+.PHONY: all build-mock generate build-agent test-e2e test-k3s clean
 
 all: build-mock generate build-agent
 
@@ -26,6 +26,9 @@ build-agent: generate
 
 test-e2e: all
 	$(EXEC) bash ./scripts/test-e2e.sh
+
+test-k3s: all
+	$(EXEC) bash ./scripts/test-k3s.sh
 
 clean:
 	rm -rf build

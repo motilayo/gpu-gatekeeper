@@ -2,7 +2,9 @@ package k8s
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -62,6 +64,7 @@ type Resolver struct {
 	quotaMap   *ebpf.Map
 	podsURL    string
 	podsFile   string
+	tokenFile  string
 	cgroupRoot string
 	httpClient *http.Client
 
@@ -72,13 +75,19 @@ type Resolver struct {
 }
 
 // NewResolver initializes a new Kubernetes Pod and cgroup metadata resolver.
-func NewResolver(quotaMap *ebpf.Map, podsURL, podsFile string) *Resolver {
+func NewResolver(quotaMap *ebpf.Map, podsURL, podsFile, tokenFile string) *Resolver {
 	return &Resolver{
-		quotaMap:    quotaMap,
-		podsURL:     podsURL,
-		podsFile:    podsFile,
-		cgroupRoot:  "/sys/fs/cgroup",
-		httpClient:  &http.Client{Timeout: 5 * time.Second},
+		quotaMap:   quotaMap,
+		podsURL:    podsURL,
+		podsFile:   podsFile,
+		tokenFile:  tokenFile,
+		cgroupRoot: "/sys/fs/cgroup",
+		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
 		inodeToPath: make(map[uint64]string),
 		inodeToMeta: make(map[uint64]WorkloadMeta),
 		enrolled:    make(map[uint64]enrolledPolicy),
@@ -94,11 +103,26 @@ func (r *Resolver) fetchPods() ([]podItem, error) {
 		}
 		body = data
 	} else if r.podsURL != "" {
-		resp, err := r.httpClient.Get(r.podsURL)
+		req, err := http.NewRequest("GET", r.podsURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if r.tokenFile != "" {
+			if tokenBytes, err := os.ReadFile(r.tokenFile); err == nil && len(tokenBytes) > 0 {
+				token := strings.TrimSpace(string(tokenBytes))
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+			}
+		}
+		resp, err := r.httpClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("kubelet returned HTTP %d", resp.StatusCode)
+		}
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
 			return nil, err
@@ -220,6 +244,9 @@ func (r *Resolver) SyncOnce() {
 							existingState.CurrentTokens = maxBurst
 						}
 						existingState.MaxVramBytes = maxVramBytes
+						if maxVramBytes > 0 && existingState.AllocatedVramBytes > maxVramBytes && existingState.VramQuotaExceeded == 0 {
+							existingState.VramQuotaExceeded = 1
+						}
 
 						if err := r.quotaMap.Put(&inode, &existingState); err == nil {
 							r.enrolled[inode] = newPol
@@ -249,8 +276,14 @@ func (r *Resolver) SyncOnce() {
 	}
 
 	r.mu.Lock()
-	r.inodeToPath = newInodeToPath
-	r.inodeToMeta = newInodeToMeta
+	for k, v := range newInodeToPath {
+		r.inodeToPath[k] = v
+	}
+	for k, v := range newInodeToMeta {
+		if prev, exists := r.inodeToMeta[k]; !exists || (prev.Namespace == "host" || prev.Namespace == "unknown") || (v.Namespace != "host" && v.Namespace != "unknown") {
+			r.inodeToMeta[k] = v
+		}
+	}
 	r.mu.Unlock()
 }
 

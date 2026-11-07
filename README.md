@@ -72,7 +72,13 @@ The Makefile automatically routes commands into the Lima VM when invoked on macO
 make test-e2e
 ```
 
-This automated test suite verifies all five milestones:
+To run the live k3s integration test (requires root / k3s inside Linux):
+
+```bash
+make test-k3s
+```
+
+This automated test suite verifies all milestones:
 1. **Milestone 1:** Compiles `mock/libcuda.so` and verifies `cuLaunchKernel`, `cuLaunchKernelEx`, `cuMemAlloc_v2`, and `cuMemFree_v2` symbols.
 2. **Milestone 2:** Runs `workload_sim -n 5000 -vram 104857600` and validates Prometheus attribution metrics for the cgroup inode.
 3. **Milestone 3:** Configures dynamic 20% / 80% quota paths, starts the agent, creates the cgroups *after* agent startup, runs concurrent workloads, and verifies the 20% slice achieves 200.0 IOPS (±5%) and a 0.25 ratio (±5%).
@@ -126,8 +132,9 @@ spec:
 | `--libcuda` | `./build/libcuda.so` | Path to `libcuda.so` library or mock |
 | `--metrics-addr` | `:9090` | HTTP address for Prometheus metrics |
 | `--quota` | *(repeatable)* | Manual quota specification in format `<target>:<refill_rate>:<max_burst>` |
-| `--kubelet-pods-url` | `""` | HTTP URL returning Kubelet `/pods` JSON |
+| `--kubelet-pods-url` | `""` | HTTP/HTTPS URL returning Kubelet `/pods` JSON |
 | `--kubelet-pods-file` | `""` | Path to local JSON file with Kubelet `/pods` format |
+| `--kubelet-token-file` | `"/var/run/secrets/kubernetes.io/serviceaccount/token"` | Path to ServiceAccount bearer token for Kubelet HTTPS `:10250/pods` |
 
 The `<target>` for `--quota` can be:
 - A numeric cgroup inode: `--quota 12345:6400:64`

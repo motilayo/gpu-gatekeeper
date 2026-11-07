@@ -160,6 +160,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus metrics HTTP address")
 	kubeletPodsURL := flag.String("kubelet-pods-url", "", "HTTP URL returning Kubelet /pods JSON")
 	kubeletPodsFile := flag.String("kubelet-pods-file", "", "Path to local JSON file with Kubelet /pods format")
+	kubeletTokenFile := flag.String("kubelet-token-file", "/var/run/secrets/kubernetes.io/serviceaccount/token", "Path to ServiceAccount bearer token for Kubelet HTTPS :10250/pods")
 	flag.Parse()
 
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -223,7 +224,7 @@ func main() {
 	}
 
 	// Start Kubernetes workload metadata resolver & annotation quota controller
-	resolver := k8s.NewResolver(objs.CgroupQuotaMap, *kubeletPodsURL, *kubeletPodsFile)
+	resolver := k8s.NewResolver(objs.CgroupQuotaMap, *kubeletPodsURL, *kubeletPodsFile, *kubeletTokenFile)
 	resolverCtx, resolverCancel := context.WithCancel(context.Background())
 	defer resolverCancel()
 	go resolver.Start(resolverCtx, 100*time.Millisecond)
