@@ -1,0 +1,4 @@
+=== Experiment 5B Calibration Log ===
+Round 1: rate_20=100000, burst_20=64 -> throttled_20=3740, throttled_80=0, prefill_tok_s=253.78272443014973, decode_tok_s=29.650431682714093
+Calibration success! Selected rates: prefill_rate=100000, burst=64, decode_rate=2000000
+Final Calibrated Rates: RATE_20=100000, BURST_20=64, RATE_80=2000000, BURST_80=200000

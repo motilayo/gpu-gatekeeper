@@ -1,0 +1,25 @@
+{
+  "label": "unmanaged-prefill-trial2",
+  "pid": 5362,
+  "cgroup_id": 8008,
+  "gpu_name": "Tesla T4",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "mode": "prefill-flood",
+  "batch_size": 16,
+  "seq_len": 512,
+  "duration_configured": 45.0,
+  "duration_actual_sec": 46.03348429099992,
+  "batches_completed": 43,
+  "total_prefill_tokens": 352256,
+  "prefill_tokens_per_sec": 7652.168968423494,
+  "tokens_per_sec": 7652.168968423494,
+  "batch_latency_ms": {
+    "p50": 1073.471647000133,
+    "p95": 1080.8105039000566,
+    "p99": 1081.923847739954,
+    "mean": 1070.4780406046539,
+    "min": 956.1040810001487,
+    "max": 1082.2519109999575,
+    "count": 43
+  }
+}

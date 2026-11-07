@@ -113,6 +113,22 @@ static __always_inline int handle_launch(struct pt_regs *ctx, __u64 cost)
         return 0;
     }
 
+    /*
+     * Surplus Fast-Path: when the bucket is >50% full with zero debt, skip the
+     * bpf_ktime_get_ns() clock read and 64-bit refill division on 7 of every 8
+     * launches. Exact token accounting is preserved because each fast-path launch
+     * still deducts `cost` from `current_tokens`, and the next slow-path launch
+     * refills for the full elapsed `now - state->last_update_ns` interval.
+     */
+    if (state->debt_tokens == 0 &&
+        state->current_tokens > (state->max_burst_tokens >> 1) &&
+        state->current_tokens >= cost &&
+        ((state->total_launches & 7ULL) != 0)) {
+        state->current_tokens -= cost;
+        __sync_fetch_and_add(&state->total_launches, 1);
+        return 0;
+    }
+
     __u64 now = bpf_ktime_get_ns();
     if (state->last_update_ns == 0) {
         state->last_update_ns = now;

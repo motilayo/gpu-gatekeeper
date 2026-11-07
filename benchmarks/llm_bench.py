@@ -133,6 +133,9 @@ def main():
     parser = argparse.ArgumentParser(description="HuggingFace LLM Real GPU Benchmark for G-Gate")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B-Instruct", help="Primary HuggingFace model")
     parser.add_argument("--fallback-model", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0", help="Fallback model")
+    parser.add_argument("--mode", type=str, choices=["decode", "prefill-flood"], default="decode", help="Benchmark mode: 'decode' or 'prefill-flood'")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size for prefill-flood mode (default: 16)")
+    parser.add_argument("--seq-len", type=int, default=512, help="Sequence length for prefill-flood mode (default: 512)")
     parser.add_argument("--duration", type=float, default=60.0, help="Benchmark run time in seconds (default: 60.0)")
     parser.add_argument("--prompt-tokens", type=int, default=128, help="Prompt token count (default: 128)")
     parser.add_argument("--new-tokens", type=int, default=128, help="Generated tokens per request (default: 128)")
@@ -148,84 +151,158 @@ def main():
     cgroup_id = get_cgroup_id()
     gpu_name = torch.cuda.get_device_name(0)
 
-    print(f"[{args.label}] started: pid={pid} cgroup_id={cgroup_id} gpu={gpu_name}", flush=True)
+    print(f"[{args.label}] started: pid={pid} cgroup_id={cgroup_id} gpu={gpu_name} mode={args.mode}", flush=True)
 
     model, tokenizer, active_model_name = load_model(args.model, args.fallback_model)
-    input_ids = build_fixed_prompt(tokenizer, args.prompt_tokens)
 
-    # Warmup runs (excluded from all metrics)
-    print(f"[{args.label}] Warming up ({args.warmup_requests} requests)...", flush=True)
-    for _ in range(args.warmup_requests):
-        run_request(model, input_ids, args.new_tokens)
-    torch.cuda.synchronize()
-    print(f"[{args.label}] Warmup complete. Starting timed benchmark for {args.duration}s...", flush=True)
+    if args.mode == "prefill-flood":
+        # Prefill Flood: batch_size x seq_len forward passes with use_cache=False
+        input_ids = torch.randint(low=10, high=1000, size=(args.batch_size, args.seq_len), device="cuda", dtype=torch.long)
+        print(f"[{args.label}] Warming up ({args.warmup_requests} prefill batches of size {args.batch_size}x{args.seq_len})...", flush=True)
+        for _ in range(args.warmup_requests):
+            with torch.no_grad():
+                model(input_ids, use_cache=False)
+            torch.cuda.synchronize()
+        print(f"[{args.label}] Warmup complete. Starting timed prefill-flood benchmark for {args.duration}s...", flush=True)
 
-    all_ttft_ms: List[float] = []
-    all_itl_ms: List[float] = []
-    completed_requests = 0
-    total_tokens_generated = 0
+        batch_latencies_ms: List[float] = []
+        batches_completed = 0
+        bench_start = time.monotonic()
+        while True:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                model(input_ids, use_cache=False)
+            torch.cuda.synchronize()
+            t1 = time.perf_counter()
+            batch_latencies_ms.append((t1 - t0) * 1000.0)
+            batches_completed += 1
 
-    bench_start = time.monotonic()
-    while True:
-        ttft, itls = run_request(model, input_ids, args.new_tokens)
-        all_ttft_ms.append(ttft)
-        all_itl_ms.extend(itls)
-        completed_requests += 1
-        total_tokens_generated += (1 + len(itls))
+            elapsed = time.monotonic() - bench_start
+            if elapsed >= args.duration:
+                break
 
-        elapsed = time.monotonic() - bench_start
-        if elapsed >= args.duration:
-            break
+        total_elapsed_sec = time.monotonic() - bench_start
+        total_prefill_tokens = batches_completed * args.batch_size * args.seq_len
+        prefill_tokens_per_sec = total_prefill_tokens / total_elapsed_sec if total_elapsed_sec > 0 else 0.0
 
-    total_elapsed_sec = time.monotonic() - bench_start
-    tokens_per_sec = total_tokens_generated / total_elapsed_sec if total_elapsed_sec > 0 else 0.0
+        lat_p50 = percentile(batch_latencies_ms, 50.0)
+        lat_p95 = percentile(batch_latencies_ms, 95.0)
+        lat_p99 = percentile(batch_latencies_ms, 99.0)
+        mean_lat = sum(batch_latencies_ms) / len(batch_latencies_ms) if batch_latencies_ms else 0.0
 
-    ttft_p50 = percentile(all_ttft_ms, 50.0)
-    ttft_p95 = percentile(all_ttft_ms, 95.0)
-    itl_p50 = percentile(all_itl_ms, 50.0)
-    itl_p95 = percentile(all_itl_ms, 95.0)
-    itl_p99 = percentile(all_itl_ms, 99.0)
+        print(
+            f"[{args.label}] finished: mode=prefill-flood batches={batches_completed} "
+            f"total_tokens={total_prefill_tokens} elapsed_sec={total_elapsed_sec:.3f} "
+            f"prefill_tokens_per_sec={prefill_tokens_per_sec:.2f} "
+            f"batch_lat(p50={lat_p50:.2f}ms, p95={lat_p95:.2f}ms, p99={lat_p99:.2f}ms)",
+            flush=True,
+        )
 
-    mean_ttft = sum(all_ttft_ms) / len(all_ttft_ms) if all_ttft_ms else 0.0
-    mean_itl = sum(all_itl_ms) / len(all_itl_ms) if all_itl_ms else 0.0
+        metrics = {
+            "label": args.label,
+            "pid": pid,
+            "cgroup_id": cgroup_id,
+            "gpu_name": gpu_name,
+            "model": active_model_name,
+            "mode": "prefill-flood",
+            "batch_size": args.batch_size,
+            "seq_len": args.seq_len,
+            "duration_configured": args.duration,
+            "duration_actual_sec": total_elapsed_sec,
+            "batches_completed": batches_completed,
+            "total_prefill_tokens": total_prefill_tokens,
+            "prefill_tokens_per_sec": prefill_tokens_per_sec,
+            "tokens_per_sec": prefill_tokens_per_sec,
+            "batch_latency_ms": {
+                "p50": lat_p50,
+                "p95": lat_p95,
+                "p99": lat_p99,
+                "mean": mean_lat,
+                "min": min(batch_latencies_ms) if batch_latencies_ms else 0.0,
+                "max": max(batch_latencies_ms) if batch_latencies_ms else 0.0,
+                "count": len(batch_latencies_ms),
+            },
+        }
 
-    print(
-        f"[{args.label}] finished: requests={completed_requests} tokens={total_tokens_generated} "
-        f"elapsed_sec={total_elapsed_sec:.3f} tokens_per_sec={tokens_per_sec:.2f} "
-        f"TTFT(p50={ttft_p50:.2f}ms, p95={ttft_p95:.2f}ms) "
-        f"ITL(p50={itl_p50:.2f}ms, p95={itl_p95:.2f}ms, p99={itl_p99:.2f}ms)",
-        flush=True,
-    )
+    else:
+        # Interactive Decode: batch_size=1 greedy decoding with KV cache
+        input_ids = build_fixed_prompt(tokenizer, args.prompt_tokens)
 
-    metrics = {
-        "label": args.label,
-        "pid": pid,
-        "cgroup_id": cgroup_id,
-        "gpu_name": gpu_name,
-        "model": active_model_name,
-        "duration_configured": args.duration,
-        "duration_actual_sec": total_elapsed_sec,
-        "requests_completed": completed_requests,
-        "total_generated_tokens": total_tokens_generated,
-        "tokens_per_sec": tokens_per_sec,
-        "ttft_ms": {
-            "p50": ttft_p50,
-            "p95": ttft_p95,
-            "mean": mean_ttft,
-            "min": min(all_ttft_ms) if all_ttft_ms else 0.0,
-            "max": max(all_ttft_ms) if all_ttft_ms else 0.0,
-            "count": len(all_ttft_ms),
-        },
-        "itl_ms": {
-            "p50": itl_p50,
-            "p95": itl_p95,
-            "p99": itl_p99,
-            "mean": mean_itl,
-            "min": min(all_itl_ms) if all_itl_ms else 0.0,
-            "max": max(all_itl_ms) if all_itl_ms else 0.0,
-            "count": len(all_itl_ms),
-        },
-    }
+        # Warmup runs (excluded from all metrics)
+        print(f"[{args.label}] Warming up ({args.warmup_requests} requests)...", flush=True)
+        for _ in range(args.warmup_requests):
+            run_request(model, input_ids, args.new_tokens)
+        torch.cuda.synchronize()
+        print(f"[{args.label}] Warmup complete. Starting timed decode benchmark for {args.duration}s...", flush=True)
+
+        all_ttft_ms: List[float] = []
+        all_itl_ms: List[float] = []
+        completed_requests = 0
+        total_tokens_generated = 0
+
+        bench_start = time.monotonic()
+        while True:
+            ttft, itls = run_request(model, input_ids, args.new_tokens)
+            all_ttft_ms.append(ttft)
+            all_itl_ms.extend(itls)
+            completed_requests += 1
+            total_tokens_generated += (1 + len(itls))
+
+            elapsed = time.monotonic() - bench_start
+            if elapsed >= args.duration:
+                break
+
+        total_elapsed_sec = time.monotonic() - bench_start
+        tokens_per_sec = total_tokens_generated / total_elapsed_sec if total_elapsed_sec > 0 else 0.0
+
+        ttft_p50 = percentile(all_ttft_ms, 50.0)
+        ttft_p95 = percentile(all_ttft_ms, 95.0)
+        itl_p50 = percentile(all_itl_ms, 50.0)
+        itl_p95 = percentile(all_itl_ms, 95.0)
+        itl_p99 = percentile(all_itl_ms, 99.0)
+
+        mean_ttft = sum(all_ttft_ms) / len(all_ttft_ms) if all_ttft_ms else 0.0
+        mean_itl = sum(all_itl_ms) / len(all_itl_ms) if all_itl_ms else 0.0
+
+        print(
+            f"[{args.label}] finished: mode=decode requests={completed_requests} tokens={total_tokens_generated} "
+            f"elapsed_sec={total_elapsed_sec:.3f} tokens_per_sec={tokens_per_sec:.2f} "
+            f"TTFT(p50={ttft_p50:.2f}ms, p95={ttft_p95:.2f}ms) "
+            f"ITL(p50={itl_p50:.2f}ms, p95={itl_p95:.2f}ms, p99={itl_p99:.2f}ms)",
+            flush=True,
+        )
+
+        metrics = {
+            "label": args.label,
+            "pid": pid,
+            "cgroup_id": cgroup_id,
+            "gpu_name": gpu_name,
+            "model": active_model_name,
+            "mode": "decode",
+            "duration_configured": args.duration,
+            "duration_actual_sec": total_elapsed_sec,
+            "requests_completed": completed_requests,
+            "total_generated_tokens": total_tokens_generated,
+            "tokens_per_sec": tokens_per_sec,
+            "ttft_ms": {
+                "p50": ttft_p50,
+                "p95": ttft_p95,
+                "mean": mean_ttft,
+                "min": min(all_ttft_ms) if all_ttft_ms else 0.0,
+                "max": max(all_ttft_ms) if all_ttft_ms else 0.0,
+                "count": len(all_ttft_ms),
+            },
+            "itl_ms": {
+                "p50": itl_p50,
+                "p95": itl_p95,
+                "p99": itl_p99,
+                "mean": mean_itl,
+                "min": min(all_itl_ms) if all_itl_ms else 0.0,
+                "max": max(all_itl_ms) if all_itl_ms else 0.0,
+                "count": len(all_itl_ms),
+            },
+        }
 
     if args.json_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.json_out)), exist_ok=True)

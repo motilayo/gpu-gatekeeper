@@ -1,0 +1,30 @@
+{
+  "label": "unmanaged-decode-trial2",
+  "pid": 5363,
+  "cgroup_id": 7948,
+  "gpu_name": "Tesla T4",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "mode": "decode",
+  "duration_configured": 45.0,
+  "duration_actual_sec": 46.73520267599997,
+  "requests_completed": 9,
+  "total_generated_tokens": 1152,
+  "tokens_per_sec": 24.649513301278333,
+  "ttft_ms": {
+    "p50": 49.4746640001722,
+    "p95": 60.506056000031094,
+    "mean": 49.08355311110628,
+    "min": 36.527614000078756,
+    "max": 61.12136000001556,
+    "count": 9
+  },
+  "itl_ms": {
+    "p50": 41.14958700006355,
+    "p95": 53.449887000033414,
+    "p99": 54.02051820005908,
+    "mean": 40.48056760192458,
+    "min": 31.61410600000636,
+    "max": 54.81757999996262,
+    "count": 1143
+  }
+}
