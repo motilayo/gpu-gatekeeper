@@ -19,7 +19,7 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 
 #### Token-Bucket Physics & Self-Clocking Scheduler Analysis
 
-1. **Deterministic Micro-Slicing (`MAX_PAUSE_NS` 10 ms Ceiling):** Rather than blocking a process for seconds when encountering large token deficits, G-Gate enforces a 10 ms micro-pause ceiling (`MAX_PAUSE_NS = 10,000,000 ns`). Any remaining deficit is recorded in `debt_tokens` and paid off in subsequent micro-slices, preventing heartbeat timeouts or healthcheck dropouts in Kubernetes.
+1. **Deterministic Micro-Slicing (`MAX_PAUSE_NS` Ceiling):** Rather than blocking a process for seconds when encountering large token deficits, G-Gate enforces a micro-pause ceiling (`MAX_PAUSE_NS = 50,000,000 ns` / 50 ms). Any remaining deficit is recorded in `debt_tokens` and paid off in subsequent micro-slices, preventing heartbeat timeouts or healthcheck dropouts in Kubernetes.
 2. **Deficit Payoff Math & Future Timestamp Guard:** When a process is paused for `sleep_ns`, the token bucket's `last_update_ns` is advanced to `max(now, last_update_ns) + sleep_ns`. Refills only occur when `now > last_update_ns`, preventing paused threads from accumulating "free" tokens during their penalty sleep.
 3. **True Wall-Clock Latency Accounting:** The userspace Go ringbuffer reader records `pausedAt := time.Now()` upon receiving a `throttle_event` and measures `time.Since(pausedAt)` when dispatching `SIGCONT`, ensuring `ggate_gpu_throttled_seconds_total` reflects physical wall-clock pause duration without under-counting.
 4. **CUDA Graph Replay & Async Memory Lifecycle:** G-Gate intercepts `cuGraphLaunch` (attributing fixed-cost token weight to graph execution without kernel disassembly) and tracks modern stream-ordered VRAM lifecycle via `cuMemAllocAsync` / `cuMemFreeAsync`.
@@ -62,12 +62,14 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 
 ## Features
 
-- **Zero-Injection Observability:** Intercepts `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync` without modifying container images or injecting `LD_PRELOAD`.
+- **Zero-Injection Observability:** Intercepts `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuGraphAddKernelNode`, `cuGraphInstantiate`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync` without modifying container images or injecting `LD_PRELOAD`.
+- **Dynamic CUDA Graph Introspection:** Intercepts `cuGraphAddKernelNode` and `cuGraphInstantiate` to dynamically accumulate individual node kernel costs for each `CUgraphExec`, charging exact per-graph token weights upon `cuGraphLaunch` instead of static heuristics.
+- **Active VRAM Quota Enforcement Policies (`audit | throttle | kill`):** Configurable via `--vram-policy`, Pod annotation (`g-gate.io/vram-policy`), or DRA claim parameters. Supports passive `audit` logging, QoS micro-slicing `throttle` (`SIGSTOP`/`SIGCONT`), or hard process termination via `kill` (`SIGKILL`) upon VRAM quota violation.
 - **Driver Auto-Discovery (`--libcuda=auto`):** Automatically locates active NVIDIA driver libraries across container runtimes, GPU Operator paths, and host filesystems.
 - **Native Kubernetes DRA Support (`resource.k8s.io/v1`):** Native Dynamic Resource Allocation driver and controller that auto-discovers bound `ResourceClaim` objects, parses consumed capacity shares and VRAM limits, and generates Container Device Interface (CDI 0.6.0) device specifications with zero Pod annotations required.
 - **Kubernetes Pod Label Resolution:** Correlates cgroup v2 inodes with Kubelet HTTPS (`:10250/pods`) using ServiceAccount Bearer token authentication, enriching Prometheus metrics with `namespace`, `pod`, and `container` labels.
-- **Pod Annotation Quotas:** Declare GPU compute and VRAM quotas directly on Pod manifests using `g-gate.io/tokens-per-sec` and `g-gate.io/max-vram-mb` annotations with zero agent restarts.
-- **10 ms Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 10 ms ceiling to prevent process starvation or Kubernetes probe timeouts.
+- **Pod Annotation Quotas:** Declare GPU compute and VRAM quotas directly on Pod manifests using `g-gate.io/tokens-per-sec`, `g-gate.io/burst-tokens`, `g-gate.io/max-vram-mb`, and `g-gate.io/vram-policy` annotations with zero agent restarts.
+- **Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 50 ms ceiling (`MAX_PAUSE_NS`) to prevent process starvation or Kubernetes probe timeouts.
 - **True Wall-Clock Throttling Tracking:** Exports `ggate_gpu_throttled_seconds_total` measuring physical pause time added by QoS rate limiting.
 - **Live VRAM Lifecycle Tracking:** Accurately attributes memory allocations on `cuMemAlloc_v2` / `cuMemAllocAsync` and releases on `cuMemFree_v2` / `cuMemFreeAsync` back to 0, flagging quota overages in `ggate_vram_quota_exceeded_total`.
 - **Production Packaging:** Multi-stage `Dockerfile`, Helm chart (`deploy/helm/ggate`), GitHub Actions E2E CI (`.github/workflows/ci.yml`), and pre-built Grafana dashboard (`deploy/grafana/ggate-dashboard.json`).
@@ -104,11 +106,11 @@ To run the live k3s integration test (requires root / k3s inside Linux):
 make test-k3s
 ```
 
-### Complete 11-Milestone Engineering & Verification Progression
+### Complete 12-Milestone Engineering & Verification Progression
 
 | Milestone | Scope | Verification Target |
 | :--- | :--- | :--- |
-| **Milestone 1** | Compiles `mock/libcuda.so` and verifies symbol exports for `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync`. | `make test-e2e` |
+| **Milestone 1** | Compiles `mock/libcuda.so` and verifies symbol exports for `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuGraphAddKernelNode`, `cuGraphInstantiate`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync`. | `make test-e2e` |
 | **Milestone 2** | Runs `workload_sim -n 5000 -vram 104857600` and validates eBPF `uprobe` Prometheus attribution metrics for the `cgroup v2` inode. | `make test-e2e` |
 | **Milestone 3** | Configures dynamic 20% / 80% quota paths, starts the agent, creates the cgroups *after* agent startup, runs concurrent workloads, and verifies the 20% slice achieves `200.0` IOPS (±5%) and a `0.25` ratio (±5%). | `make test-e2e` |
 | **Milestone 4** | Runs `workload_sim -free-on-exit` and confirms allocated VRAM is accurately decremented back to `0 B` via `uretprobe/cuMemAlloc_v2` and `uprobe/cuMemFree_v2`. | `make test-e2e` |
@@ -119,6 +121,7 @@ make test-k3s
 | **Milestone 9 (`v0.2`)** | **CUDA Graphs, Async Memory & 10 ms Micro-Pausing:** Validates `uprobe/cuGraphLaunch`, stream-ordered memory (`cuMemAllocAsync` / `cuMemFreeAsync`), `--libcuda=auto` driver discovery, and 10 ms micro-sliced wall-clock latency accounting. | `make test-e2e` |
 | **Milestone 10** | **Third-Party Validation & Reproducibility Suite (`benchmarks/`):** Multi-trial statistical benchmark suite (`N=5` / `N=3`) on an AWS `g4dn.xlarge` Tesla T4 covering attribution overhead (`+2.40 µs`), 50/50 (`99.98%`), 20/80 (`99.57%`), 10/30/60 (`99.92%`), CUDA Graph replay (`99.65%`), and VRAM lifecycle (`0-drift`). | `./benchmarks/run-validation-suite.sh` |
 | **Milestone 11 (`v0.3`)** | **Native Kubernetes DRA (`resource.k8s.io/v1`) & CDI `0.6.0` Driver:** Validates `ResourceClaim` discovery (`v1` + `v1beta1` fallback), `NodePrepareResources` lifecycle cache ordering, hardware-safe CDI `0.6.0` spec generation, `resource_claim` metric labeling, and zero-annotation quota enforcement. | `make test-e2e` & `make test-unit` |
+| **Milestone 12 (`v0.4`)** | **Dynamic CUDA Graph Costing & Active VRAM Policy (`kill`):** Intercepts `cuGraphAddKernelNode` & `cuGraphInstantiate` to dynamically cost constituent graph nodes (`50.0` replays/sec on 4-node graph), enforces active VRAM `kill` policy via immediate `SIGKILL` termination, and patches Dependabot security alerts. | `make test-e2e` & `make test-unit` |
 
 ### Build Targets
 
@@ -147,7 +150,8 @@ metadata:
   annotations:
     g-gate.io/tokens-per-sec: "6400"  # ~200 kernel launches/sec for 128x256 grid
     g-gate.io/burst-tokens: "64"      # Bucket burst capacity
-    g-gate.io/max-vram-mb: "16384"    # 16 GiB VRAM quota (tracks violations)
+    g-gate.io/max-vram-mb: "16384"    # 16 GiB VRAM quota
+    g-gate.io/vram-policy: "kill"     # Active enforcement: audit | throttle | kill
 spec:
   containers:
     - name: pytorch
@@ -179,6 +183,7 @@ spec:
             consumedCapacity:
               gpu.g-gate.io/tokens-per-sec: "6400"  # ~200 kernel launches/sec
               gpu.g-gate.io/burst-tokens: "64"      # Burst token capacity
+              gpu.g-gate.io/vram-policy: "kill"     # audit | throttle | kill
               memory: "16Gi"                        # 16 GiB VRAM limit
 ---
 apiVersion: v1
@@ -214,7 +219,9 @@ See [deploy/kubernetes/dra-example.yaml](deploy/kubernetes/dra-example.yaml) for
 |---|---|---|
 | `--libcuda` | `./build/libcuda.so` | Path to `libcuda.so` library, mock, or `auto` for driver discovery |
 | `--metrics-addr` | `:9090` | HTTP address for Prometheus metrics |
-| `--quota` | *(repeatable)* | Manual quota specification in format `<target>:<refill_rate>:<max_burst>` |
+| `--quota` | *(repeatable)* | Manual quota specification in format `<target>:<refill_rate>:<max_burst>[:<max_vram_bytes>]` |
+| `--vram-policy` | `"audit"` | VRAM quota enforcement policy (`audit`, `throttle`, or `kill`) |
+| `--max-vram-mb` | `0` | Default maximum VRAM quota in MiB for CLI-configured quotas |
 | `--kubelet-pods-url` | `""` | HTTP/HTTPS URL returning Kubelet `/pods` JSON |
 | `--kubelet-pods-file` | `""` | Path to local JSON file with Kubelet `/pods` format |
 | `--kubelet-token-file` | `"/var/run/secrets/kubernetes.io/serviceaccount/token"` | Path to ServiceAccount bearer token for Kubelet HTTPS `:10250/pods` |
@@ -223,7 +230,7 @@ See [deploy/kubernetes/dra-example.yaml](deploy/kubernetes/dra-example.yaml) for
 | `--cdi-dir` | `"/var/run/cdi"` | Path to directory for Container Device Interface (CDI 0.6.0) JSON specs |
 
 The `<target>` for `--quota` can be:
-- A numeric cgroup inode: `--quota 12345:6400:64`
+- A numeric cgroup inode: `--quota 12345:6400:64` (or `--quota 12345:6400:64:33554432`)
 - An absolute or relative cgroup path: `--quota /sys/fs/cgroup/ggate-test:6400:64`
 - A glob pattern: `--quota "kubepods.slice/kubepods-burstable.slice/*.scope:6400:64"`
 
@@ -241,6 +248,7 @@ The `<target>` for `--quota` can be:
 | `-grid` | `128` | Grid dimension X |
 | `-block` | `256` | Block dimension X |
 | `-graph-launch` | `0` | Replays kernel graph via `cuGraphLaunch` instead of `cuLaunchKernel` |
+| `-graph-nodes` | `0` | Number of constituent kernel nodes to construct inside CUDA graph |
 | `-async-vram` | `0` | Uses `cuMemAllocAsync` / `cuMemFreeAsync` stream-ordered memory |
 | `-free-on-exit` | `0` | Calls `cuMemFree_v2` or `cuMemFreeAsync` before exiting |
 

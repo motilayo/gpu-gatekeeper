@@ -40,6 +40,36 @@ CUresult cuGraphLaunch(void *hGraphExec, void *hStream)
     return CUDA_SUCCESS;
 }
 
+static unsigned long long next_graph_exec = 0xbeef0000ULL;
+
+__attribute__((noinline, used, visibility("default")))
+CUresult cuGraphAddKernelNode(void **phGraphNode,
+                              void *hGraph,
+                              const void *dependencies,
+                              size_t numDependencies,
+                              const void *nodeParams)
+{
+    asm volatile("" : : : "memory");
+    if (phGraphNode) {
+        *phGraphNode = (void *)0x1;
+    }
+    return CUDA_SUCCESS;
+}
+
+__attribute__((noinline, used, visibility("default")))
+CUresult cuGraphInstantiate(void **phGraphExec,
+                            void *hGraph,
+                            void *phErrorNode,
+                            char *logBuffer,
+                            size_t bufferSize)
+{
+    asm volatile("" : : : "memory");
+    if (phGraphExec) {
+        *phGraphExec = (void *)__sync_fetch_and_add(&next_graph_exec, 1ULL);
+    }
+    return CUDA_SUCCESS;
+}
+
 static unsigned long long next_dptr = 0xdead0000ULL;
 
 __attribute__((noinline, used, visibility("default")))

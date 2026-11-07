@@ -17,6 +17,7 @@ type CgroupQuotaState struct {
 	AllocatedVramBytes     uint64
 	MaxVramBytes           uint64
 	VramQuotaExceeded      uint64
+	VramPolicy             uint64
 }
 
 // ThrottleEvent matches struct throttle_event in bpf/headers/ggate.h.

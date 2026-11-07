@@ -25,10 +25,30 @@ extern CUresult cuLaunchKernel(CUfunction f,
                                void **extra);
 
 extern CUresult cuGraphLaunch(void *hGraphExec, void *hStream);
+extern CUresult cuGraphAddKernelNode(void **phGraphNode,
+                                     void *hGraph,
+                                     const void *dependencies,
+                                     size_t numDependencies,
+                                     const void *nodeParams);
+extern CUresult cuGraphInstantiate(void **phGraphExec,
+                                   void *hGraph,
+                                   void *phErrorNode,
+                                   char *logBuffer,
+                                   size_t bufferSize);
 extern CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
 extern CUresult cuMemFree_v2(CUdeviceptr dptr);
 extern CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, void *hStream);
 extern CUresult cuMemFreeAsync(CUdeviceptr dptr, void *hStream);
+
+struct cuda_kernel_node_params_prefix {
+    void *func;
+    unsigned int gridDimX;
+    unsigned int gridDimY;
+    unsigned int gridDimZ;
+    unsigned int blockDimX;
+    unsigned int blockDimY;
+    unsigned int blockDimZ;
+};
 
 static unsigned long long get_cgroup_id(void) {
     FILE *fp = fopen("/proc/self/cgroup", "r");
@@ -67,6 +87,7 @@ int main(int argc, char *argv[]) {
     int free_on_exit = 0;
     int use_graph_launch = 0;
     int use_async_vram = 0;
+    int graph_nodes = 0;
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--n") == 0) && i + 1 < argc) {
@@ -83,6 +104,8 @@ int main(int argc, char *argv[]) {
             free_on_exit = 1;
         } else if (strcmp(argv[i], "-graph-launch") == 0 || strcmp(argv[i], "--graph-launch") == 0) {
             use_graph_launch = 1;
+        } else if ((strcmp(argv[i], "-graph-nodes") == 0 || strcmp(argv[i], "--graph-nodes") == 0) && i + 1 < argc) {
+            graph_nodes = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-async-vram") == 0 || strcmp(argv[i], "--async-vram") == 0) {
             use_async_vram = 1;
         }
@@ -102,6 +125,26 @@ int main(int argc, char *argv[]) {
         cuMemAlloc_v2(&dptr, vram_bytes);
     }
 
+    /* Instantiate graph if graph-launch and graph-nodes > 0 */
+    void *hGraphExec = (void *)0x1;
+    if (use_graph_launch && graph_nodes > 0) {
+        void *hGraph = (void *)(unsigned long long)getpid();
+        struct cuda_kernel_node_params_prefix params = {
+            .func = (void *)0x1,
+            .gridDimX = grid_x,
+            .gridDimY = 1,
+            .gridDimZ = 1,
+            .blockDimX = block_x,
+            .blockDimY = 1,
+            .blockDimZ = 1,
+        };
+        for (int k = 0; k < graph_nodes; k++) {
+            void *node = NULL;
+            cuGraphAddKernelNode(&node, hGraph, NULL, 0, &params);
+        }
+        cuGraphInstantiate(&hGraphExec, hGraph, NULL, NULL, 0);
+    }
+
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
@@ -109,7 +152,7 @@ int main(int argc, char *argv[]) {
     if (duration > 0.0) {
         while (1) {
             if (use_graph_launch) {
-                cuGraphLaunch((void *)0x1, NULL);
+                cuGraphLaunch(hGraphExec, NULL);
             } else {
                 cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
             }
@@ -126,7 +169,7 @@ int main(int argc, char *argv[]) {
     } else {
         for (unsigned long long i = 0; i < iterations; i++) {
             if (use_graph_launch) {
-                cuGraphLaunch((void *)0x1, NULL);
+                cuGraphLaunch(hGraphExec, NULL);
             } else {
                 cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
             }

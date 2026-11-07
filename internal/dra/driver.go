@@ -27,6 +27,7 @@ type PreparedClaim struct {
 	TokensPerSec uint64 `json:"tokensPerSec"`
 	BurstTokens  uint64 `json:"burstTokens"`
 	MaxVramBytes uint64 `json:"maxVramBytes"`
+	VRAMPolicy   string `json:"vramPolicy,omitempty"`
 }
 
 // CDISpec represents the Container Device Interface 0.6.0 JSON specification.
@@ -166,6 +167,12 @@ func (d *Driver) writeCDISpecLocked() error {
 		}
 		if claim.Namespace != "" {
 			env = append(env, fmt.Sprintf("G_GATE_NAMESPACE=%s", claim.Namespace))
+		}
+		if claim.VRAMPolicy != "" {
+			env = append(env,
+				fmt.Sprintf("GGATE_VRAM_POLICY=%s", claim.VRAMPolicy),
+				fmt.Sprintf("G_GATE_VRAM_POLICY=%s", claim.VRAMPolicy),
+			)
 		}
 
 		dev := CDIDevice{

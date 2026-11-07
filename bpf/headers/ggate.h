@@ -5,6 +5,10 @@
 #include <linux/types.h>
 #endif
 
+#define VRAM_POLICY_AUDIT    0ULL
+#define VRAM_POLICY_THROTTLE 1ULL
+#define VRAM_POLICY_KILL     2ULL
+
 /*
  * struct cgroup_quota_state
  * Map value for cgroup_quota_map (BPF_MAP_TYPE_HASH).
@@ -14,7 +18,7 @@ struct cgroup_quota_state {
     __u64 refill_rate_tokens_per_sec; /* Configured by Go agent / K8s annotations */
     __u64 max_burst_tokens;           /* Bucket capacity */
     __u64 current_tokens;             /* Updated in eBPF */
-    __u64 debt_tokens;                /* Unpaid token deficit across 10ms micro-pause slices */
+    __u64 debt_tokens;                /* Unpaid token deficit across micro-pause slices */
     __u64 last_update_ns;             /* Updated via bpf_ktime_get_ns() */
     __u64 total_launches;             /* Kernel launch counter */
     __u64 total_throttled;            /* Throttle event counter */
@@ -22,6 +26,7 @@ struct cgroup_quota_state {
     __u64 allocated_vram_bytes;       /* Updated by cuMemAlloc_v2 / cuMemAllocAsync probe */
     __u64 max_vram_bytes;             /* Configured VRAM quota in bytes (0 = unlimited) */
     __u64 vram_quota_exceeded;        /* Counter of allocations exceeding max_vram_bytes */
+    __u64 vram_policy;                /* Enforcement policy: 0 = audit, 1 = throttle, 2 = kill */
 };
 
 /*
@@ -61,6 +66,20 @@ struct inflight_vram_alloc {
 struct vram_alloc_entry {
     __u64 cgroup_id;
     __u64 bytesize;
+};
+
+struct cu_kernel_node_params_prefix {
+    __u64 func;
+    __u32 gridDimX;
+    __u32 gridDimY;
+    __u32 gridDimZ;
+    __u32 blockDimX;
+    __u32 blockDimY;
+};
+
+struct inflight_graph_inst {
+    __u64 ph_graph_exec_ptr;
+    __u64 h_graph;
 };
 
 #endif /* __GGATE_H__ */

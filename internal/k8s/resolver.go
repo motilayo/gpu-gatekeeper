@@ -124,10 +124,32 @@ type deviceAllocationConfiguration struct {
 	Opaque *opaqueDeviceConfiguration `json:"opaque"`
 }
 
+const (
+	AnnotationVRAMPolicy = "g-gate.io/vram-policy"
+	VRAMPolicyAudit      = 0
+	VRAMPolicyThrottle   = 1
+	VRAMPolicyKill       = 2
+)
+
+// ParseVRAMPolicy converts a policy string ("audit", "throttle", "kill") to its numeric ID.
+func ParseVRAMPolicy(s string) uint64 {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "throttle":
+		return VRAMPolicyThrottle
+	case "kill":
+		return VRAMPolicyKill
+	case "audit":
+		fallthrough
+	default:
+		return VRAMPolicyAudit
+	}
+}
+
 type enrolledPolicy struct {
 	refillRate   uint64
 	maxBurst     uint64
 	maxVramBytes uint64
+	vramPolicy   uint64
 }
 
 // parseK8sQuantity parses standard Kubernetes quantity strings (Ki, Mi, Gi, Ti, k, M, G, T, or plain integers).
@@ -203,8 +225,9 @@ type Resolver struct {
 	claimsFile string
 	tokenFile  string
 	cgroupRoot string
-	httpClient *http.Client
-	draDriver  *dra.Driver
+	httpClient        *http.Client
+	draDriver         *dra.Driver
+	defaultVRAMPolicy uint64
 
 	mu          sync.RWMutex
 	inodeToPath map[uint64]string
@@ -241,6 +264,11 @@ func (r *Resolver) SetDRAClaimsSource(claimsURL, claimsFile string) {
 // SetDRADriver registers the DRA driver for automated CDI spec generation and in-memory claim cache access.
 func (r *Resolver) SetDRADriver(d *dra.Driver) {
 	r.draDriver = d
+}
+
+// SetDefaultVRAMPolicy sets the fallback VRAM enforcement policy when not specified on Pod or Claim.
+func (r *Resolver) SetDefaultVRAMPolicy(p uint64) {
+	r.defaultVRAMPolicy = p
 }
 
 func (r *Resolver) fetchPods() ([]podItem, error) {
@@ -443,6 +471,7 @@ func (r *Resolver) SyncOnce() {
 				var refillRate uint64
 				var maxBurst uint64
 				var maxVramBytes uint64
+				var vramPolicy = r.defaultVRAMPolicy
 				var boundClaimName string
 				var boundClaimUID string
 
@@ -550,6 +579,11 @@ func (r *Resolver) SyncOnce() {
 								maxVramBytes = mb * 1024 * 1024
 							}
 						}
+						if pStr, ok := boundClaim.Metadata.Annotations[AnnotationVRAMPolicy]; ok {
+							vramPolicy = ParseVRAMPolicy(pStr)
+						} else if pStr, ok := boundClaim.Metadata.Annotations["g-gate.io/vram-policy"]; ok {
+							vramPolicy = ParseVRAMPolicy(pStr)
+						}
 					}
 
 					// Extract from spec.devices.config[].opaque.parameters
@@ -568,6 +602,11 @@ func (r *Resolver) SyncOnce() {
 							if v, ok := cfg.Opaque.Parameters["maxVramMB"]; ok {
 								if u, ok := parseUintFromInterface(v); ok && u > 0 {
 									maxVramBytes = u * 1024 * 1024
+								}
+							}
+							if v, ok := cfg.Opaque.Parameters["vramPolicy"]; ok {
+								if s, ok := v.(string); ok && s != "" {
+									vramPolicy = ParseVRAMPolicy(s)
 								}
 							}
 						}
@@ -591,6 +630,11 @@ func (r *Resolver) SyncOnce() {
 								if v, ok := cfg.Opaque.Parameters["maxVramMB"]; ok {
 									if u, ok := parseUintFromInterface(v); ok && u > 0 {
 										maxVramBytes = u * 1024 * 1024
+									}
+								}
+								if v, ok := cfg.Opaque.Parameters["vramPolicy"]; ok {
+									if s, ok := v.(string); ok && s != "" {
+										vramPolicy = ParseVRAMPolicy(s)
 									}
 								}
 							}
@@ -643,6 +687,13 @@ func (r *Resolver) SyncOnce() {
 										}
 									}
 								}
+
+								// vram-policy or gpu.g-gate.io/vram-policy
+								if pStr, ok := res.ConsumedCapacity["gpu.g-gate.io/vram-policy"]; ok {
+									vramPolicy = ParseVRAMPolicy(pStr)
+								} else if pStr, ok := res.ConsumedCapacity["vram-policy"]; ok {
+									vramPolicy = ParseVRAMPolicy(pStr)
+								}
 							}
 						}
 					}
@@ -665,6 +716,11 @@ func (r *Resolver) SyncOnce() {
 							maxVramBytes = mb * 1024 * 1024
 						}
 					}
+					if pStr, ok := pod.Metadata.Annotations[AnnotationVRAMPolicy]; ok {
+						vramPolicy = ParseVRAMPolicy(pStr)
+					} else if pStr, ok := pod.Metadata.Annotations["g-gate.io/vram-policy"]; ok {
+						vramPolicy = ParseVRAMPolicy(pStr)
+					}
 				}
 
 				// Default maxBurst fallback: if maxBurst == 0 && refillRate > 0
@@ -681,6 +737,7 @@ func (r *Resolver) SyncOnce() {
 						refillRate:   refillRate,
 						maxBurst:     maxBurst,
 						maxVramBytes: maxVramBytes,
+						vramPolicy:   vramPolicy,
 					}
 
 					r.mu.Lock()
@@ -697,6 +754,7 @@ func (r *Resolver) SyncOnce() {
 							existingState.CurrentTokens = maxBurst
 						}
 						existingState.MaxVramBytes = maxVramBytes
+						existingState.VramPolicy = vramPolicy
 						if maxVramBytes > 0 && existingState.AllocatedVramBytes > maxVramBytes && existingState.VramQuotaExceeded == 0 {
 							existingState.VramQuotaExceeded = 1
 						}
@@ -706,11 +764,11 @@ func (r *Resolver) SyncOnce() {
 						} else if err := r.quotaMap.Put(&inode, &existingState); err == nil {
 							r.enrolled[inode] = newPol
 							if boundClaimName != "" {
-								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from DRA ResourceClaim %s (pod %s/%s): refill_rate=%d, burst=%d, max_vram_bytes=%d",
-									path, inode, boundClaimName, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from DRA ResourceClaim %s (pod %s/%s): refill_rate=%d, burst=%d, max_vram_bytes=%d, vram_policy=%d",
+									path, inode, boundClaimName, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes, vramPolicy)
 							} else {
-								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d",
-									path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d, vram_policy=%d",
+									path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes, vramPolicy)
 							}
 						} else {
 							log.Printf("k8s failed to enroll cgroup %s (inode=%d): %v", path, inode, err)
@@ -722,6 +780,12 @@ func (r *Resolver) SyncOnce() {
 							if uid == "" {
 								uid = boundClaimName
 							}
+							vramPolStr := "audit"
+							if vramPolicy == VRAMPolicyThrottle {
+								vramPolStr = "throttle"
+							} else if vramPolicy == VRAMPolicyKill {
+								vramPolStr = "kill"
+							}
 							_, _ = r.draDriver.NodePrepareResource(dra.PreparedClaim{
 								ClaimUID:     uid,
 								ClaimName:    boundClaimName,
@@ -730,6 +794,7 @@ func (r *Resolver) SyncOnce() {
 								TokensPerSec: refillRate,
 								BurstTokens:  maxBurst,
 								MaxVramBytes: maxVramBytes,
+								VRAMPolicy:   vramPolStr,
 							})
 						}
 					}

@@ -8,11 +8,13 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
 
 type ggateCgroupQuotaState struct {
+	_                      structs.HostLayout
 	RefillRateTokensPerSec uint64
 	MaxBurstTokens         uint64
 	CurrentTokens          uint64
@@ -24,17 +26,51 @@ type ggateCgroupQuotaState struct {
 	AllocatedVramBytes     uint64
 	MaxVramBytes           uint64
 	VramQuotaExceeded      uint64
+	VramPolicy             uint64
+}
+
+type ggateInflightGraphInst struct {
+	_              structs.HostLayout
+	PhGraphExecPtr uint64
+	H_graph        uint64
 }
 
 type ggateInflightVramAlloc struct {
+	_        structs.HostLayout
 	DptrPtr  uint64
 	Bytesize uint64
 }
 
 type ggateVramAllocEntry struct {
+	_        structs.HostLayout
 	CgroupId uint64
 	Bytesize uint64
 }
+
+// Names of all BPF objects in the ELF.
+//
+// Used for safe lookups in a Collection or CollectionSpec.
+const (
+	ggateMapCgroupQuotaMap               = "cgroup_quota_map"
+	ggateMapEventsRingbuf                = "events_ringbuf"
+	ggateMapGraphCostMap                 = "graph_cost_map"
+	ggateMapGraphExecCostMap             = "graph_exec_cost_map"
+	ggateMapInflightAllocMap             = "inflight_alloc_map"
+	ggateMapInflightGraphInstMap         = "inflight_graph_inst_map"
+	ggateMapVramAllocsMap                = "vram_allocs_map"
+	ggateProgHandleCuGraphAddKernelNode  = "handle_cu_graph_add_kernel_node"
+	ggateProgHandleCuGraphInstantiate    = "handle_cu_graph_instantiate"
+	ggateProgHandleCuGraphInstantiateRet = "handle_cu_graph_instantiate_ret"
+	ggateProgHandleCuGraphLaunch         = "handle_cu_graph_launch"
+	ggateProgHandleCuLaunchKernel        = "handle_cu_launch_kernel"
+	ggateProgHandleCuLaunchKernelEx      = "handle_cu_launch_kernel_ex"
+	ggateProgHandleCuMemAlloc            = "handle_cu_mem_alloc"
+	ggateProgHandleCuMemAllocAsync       = "handle_cu_mem_alloc_async"
+	ggateProgHandleCuMemAllocAsyncRet    = "handle_cu_mem_alloc_async_ret"
+	ggateProgHandleCuMemAllocRet         = "handle_cu_mem_alloc_ret"
+	ggateProgHandleCuMemFree             = "handle_cu_mem_free"
+	ggateProgHandleCuMemFreeAsync        = "handle_cu_mem_free_async"
+)
 
 // loadGgate returns the embedded CollectionSpec for ggate.
 func loadGgate() (*ebpf.CollectionSpec, error) {
@@ -56,7 +92,7 @@ func loadGgate() (*ebpf.CollectionSpec, error) {
 //	*ggateMaps
 //
 // See ebpf.CollectionSpec.LoadAndAssign documentation for details.
-func loadGgateObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
+func loadGgateObjects(obj any, opts *ebpf.CollectionOptions) error {
 	spec, err := loadGgate()
 	if err != nil {
 		return err
@@ -71,31 +107,44 @@ func loadGgateObjects(obj interface{}, opts *ebpf.CollectionOptions) error {
 type ggateSpecs struct {
 	ggateProgramSpecs
 	ggateMapSpecs
+	ggateVariableSpecs
 }
 
-// ggateSpecs contains programs before they are loaded into the kernel.
+// ggateProgramSpecs contains programs before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ggateProgramSpecs struct {
-	HandleCuGraphLaunch      *ebpf.ProgramSpec `ebpf:"handle_cu_graph_launch"`
-	HandleCuLaunchKernel     *ebpf.ProgramSpec `ebpf:"handle_cu_launch_kernel"`
-	HandleCuLaunchKernelEx   *ebpf.ProgramSpec `ebpf:"handle_cu_launch_kernel_ex"`
-	HandleCuMemAlloc         *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc"`
-	HandleCuMemAllocAsync    *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_async"`
-	HandleCuMemAllocAsyncRet *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_async_ret"`
-	HandleCuMemAllocRet      *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_ret"`
-	HandleCuMemFree          *ebpf.ProgramSpec `ebpf:"handle_cu_mem_free"`
-	HandleCuMemFreeAsync     *ebpf.ProgramSpec `ebpf:"handle_cu_mem_free_async"`
+	HandleCuGraphAddKernelNode  *ebpf.ProgramSpec `ebpf:"handle_cu_graph_add_kernel_node"`
+	HandleCuGraphInstantiate    *ebpf.ProgramSpec `ebpf:"handle_cu_graph_instantiate"`
+	HandleCuGraphInstantiateRet *ebpf.ProgramSpec `ebpf:"handle_cu_graph_instantiate_ret"`
+	HandleCuGraphLaunch         *ebpf.ProgramSpec `ebpf:"handle_cu_graph_launch"`
+	HandleCuLaunchKernel        *ebpf.ProgramSpec `ebpf:"handle_cu_launch_kernel"`
+	HandleCuLaunchKernelEx      *ebpf.ProgramSpec `ebpf:"handle_cu_launch_kernel_ex"`
+	HandleCuMemAlloc            *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc"`
+	HandleCuMemAllocAsync       *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_async"`
+	HandleCuMemAllocAsyncRet    *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_async_ret"`
+	HandleCuMemAllocRet         *ebpf.ProgramSpec `ebpf:"handle_cu_mem_alloc_ret"`
+	HandleCuMemFree             *ebpf.ProgramSpec `ebpf:"handle_cu_mem_free"`
+	HandleCuMemFreeAsync        *ebpf.ProgramSpec `ebpf:"handle_cu_mem_free_async"`
 }
 
 // ggateMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type ggateMapSpecs struct {
-	CgroupQuotaMap   *ebpf.MapSpec `ebpf:"cgroup_quota_map"`
-	EventsRingbuf    *ebpf.MapSpec `ebpf:"events_ringbuf"`
-	InflightAllocMap *ebpf.MapSpec `ebpf:"inflight_alloc_map"`
-	VramAllocsMap    *ebpf.MapSpec `ebpf:"vram_allocs_map"`
+	CgroupQuotaMap       *ebpf.MapSpec `ebpf:"cgroup_quota_map"`
+	EventsRingbuf        *ebpf.MapSpec `ebpf:"events_ringbuf"`
+	GraphCostMap         *ebpf.MapSpec `ebpf:"graph_cost_map"`
+	GraphExecCostMap     *ebpf.MapSpec `ebpf:"graph_exec_cost_map"`
+	InflightAllocMap     *ebpf.MapSpec `ebpf:"inflight_alloc_map"`
+	InflightGraphInstMap *ebpf.MapSpec `ebpf:"inflight_graph_inst_map"`
+	VramAllocsMap        *ebpf.MapSpec `ebpf:"vram_allocs_map"`
+}
+
+// ggateVariableSpecs contains global variables before they are loaded into the kernel.
+//
+// It can be passed ebpf.CollectionSpec.Assign.
+type ggateVariableSpecs struct {
 }
 
 // ggateObjects contains all objects after they have been loaded into the kernel.
@@ -104,6 +153,7 @@ type ggateMapSpecs struct {
 type ggateObjects struct {
 	ggatePrograms
 	ggateMaps
+	ggateVariables
 }
 
 func (o *ggateObjects) Close() error {
@@ -117,38 +167,56 @@ func (o *ggateObjects) Close() error {
 //
 // It can be passed to loadGgateObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ggateMaps struct {
-	CgroupQuotaMap   *ebpf.Map `ebpf:"cgroup_quota_map"`
-	EventsRingbuf    *ebpf.Map `ebpf:"events_ringbuf"`
-	InflightAllocMap *ebpf.Map `ebpf:"inflight_alloc_map"`
-	VramAllocsMap    *ebpf.Map `ebpf:"vram_allocs_map"`
+	CgroupQuotaMap       *ebpf.Map `ebpf:"cgroup_quota_map"`
+	EventsRingbuf        *ebpf.Map `ebpf:"events_ringbuf"`
+	GraphCostMap         *ebpf.Map `ebpf:"graph_cost_map"`
+	GraphExecCostMap     *ebpf.Map `ebpf:"graph_exec_cost_map"`
+	InflightAllocMap     *ebpf.Map `ebpf:"inflight_alloc_map"`
+	InflightGraphInstMap *ebpf.Map `ebpf:"inflight_graph_inst_map"`
+	VramAllocsMap        *ebpf.Map `ebpf:"vram_allocs_map"`
 }
 
 func (m *ggateMaps) Close() error {
 	return _GgateClose(
 		m.CgroupQuotaMap,
 		m.EventsRingbuf,
+		m.GraphCostMap,
+		m.GraphExecCostMap,
 		m.InflightAllocMap,
+		m.InflightGraphInstMap,
 		m.VramAllocsMap,
 	)
+}
+
+// ggateVariables contains all global variables after they have been loaded into the kernel.
+//
+// It can be passed to loadGgateObjects or ebpf.CollectionSpec.LoadAndAssign.
+type ggateVariables struct {
 }
 
 // ggatePrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadGgateObjects or ebpf.CollectionSpec.LoadAndAssign.
 type ggatePrograms struct {
-	HandleCuGraphLaunch      *ebpf.Program `ebpf:"handle_cu_graph_launch"`
-	HandleCuLaunchKernel     *ebpf.Program `ebpf:"handle_cu_launch_kernel"`
-	HandleCuLaunchKernelEx   *ebpf.Program `ebpf:"handle_cu_launch_kernel_ex"`
-	HandleCuMemAlloc         *ebpf.Program `ebpf:"handle_cu_mem_alloc"`
-	HandleCuMemAllocAsync    *ebpf.Program `ebpf:"handle_cu_mem_alloc_async"`
-	HandleCuMemAllocAsyncRet *ebpf.Program `ebpf:"handle_cu_mem_alloc_async_ret"`
-	HandleCuMemAllocRet      *ebpf.Program `ebpf:"handle_cu_mem_alloc_ret"`
-	HandleCuMemFree          *ebpf.Program `ebpf:"handle_cu_mem_free"`
-	HandleCuMemFreeAsync     *ebpf.Program `ebpf:"handle_cu_mem_free_async"`
+	HandleCuGraphAddKernelNode  *ebpf.Program `ebpf:"handle_cu_graph_add_kernel_node"`
+	HandleCuGraphInstantiate    *ebpf.Program `ebpf:"handle_cu_graph_instantiate"`
+	HandleCuGraphInstantiateRet *ebpf.Program `ebpf:"handle_cu_graph_instantiate_ret"`
+	HandleCuGraphLaunch         *ebpf.Program `ebpf:"handle_cu_graph_launch"`
+	HandleCuLaunchKernel        *ebpf.Program `ebpf:"handle_cu_launch_kernel"`
+	HandleCuLaunchKernelEx      *ebpf.Program `ebpf:"handle_cu_launch_kernel_ex"`
+	HandleCuMemAlloc            *ebpf.Program `ebpf:"handle_cu_mem_alloc"`
+	HandleCuMemAllocAsync       *ebpf.Program `ebpf:"handle_cu_mem_alloc_async"`
+	HandleCuMemAllocAsyncRet    *ebpf.Program `ebpf:"handle_cu_mem_alloc_async_ret"`
+	HandleCuMemAllocRet         *ebpf.Program `ebpf:"handle_cu_mem_alloc_ret"`
+	HandleCuMemFree             *ebpf.Program `ebpf:"handle_cu_mem_free"`
+	HandleCuMemFreeAsync        *ebpf.Program `ebpf:"handle_cu_mem_free_async"`
 }
 
 func (p *ggatePrograms) Close() error {
 	return _GgateClose(
+		p.HandleCuGraphAddKernelNode,
+		p.HandleCuGraphInstantiate,
+		p.HandleCuGraphInstantiateRet,
 		p.HandleCuGraphLaunch,
 		p.HandleCuLaunchKernel,
 		p.HandleCuLaunchKernelEx,

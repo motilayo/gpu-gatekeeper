@@ -19,6 +19,7 @@ CGROUP_M4="/sys/fs/cgroup/ggate-e2e-m4"
 CGROUP_M5="/sys/fs/cgroup/kubepods-pod11111111_2222_3333_4444_555555555555-abcdef123456"
 CGROUP_M9="/sys/fs/cgroup/ggate-e2e-m9"
 CGROUP_DRA="/sys/fs/cgroup/kubepods-poddra111111_2222_3333_4444_555555555555-abcdef987654"
+CGROUP_M12="/sys/fs/cgroup/ggate-e2e-m12"
 
 cleanup() {
     echo "=== Running cleanup ==="
@@ -36,6 +37,7 @@ cleanup() {
     rmdir "${CGROUP_M5}" 2>/dev/null || true
     rmdir "${CGROUP_M9}" 2>/dev/null || true
     rmdir "${CGROUP_DRA}" 2>/dev/null || true
+    rmdir "${CGROUP_M12}" 2>/dev/null || true
     rm -f /tmp/ggate_agent_*.log /tmp/sim_*.log /tmp/mock_kubelet_pods.json /tmp/mock_dra_*.json
 }
 trap cleanup EXIT
@@ -51,6 +53,8 @@ fi
 LAUNCH_SYM=$(nm -D build/libcuda.so | grep -w "cuLaunchKernel" || true)
 LAUNCH_EX_SYM=$(nm -D build/libcuda.so | grep -w "cuLaunchKernelEx" || true)
 GRAPH_SYM=$(nm -D build/libcuda.so | grep -w "cuGraphLaunch" || true)
+GRAPH_ADD_NODE_SYM=$(nm -D build/libcuda.so | grep -w "cuGraphAddKernelNode" || true)
+GRAPH_INST_SYM=$(nm -D build/libcuda.so | grep -w "cuGraphInstantiate" || true)
 ALLOC_SYM=$(nm -D build/libcuda.so | grep -w "cuMemAlloc_v2" || true)
 FREE_SYM=$(nm -D build/libcuda.so | grep -w "cuMemFree_v2" || true)
 ALLOC_ASYNC_SYM=$(nm -D build/libcuda.so | grep -w "cuMemAllocAsync" || true)
@@ -66,6 +70,14 @@ if [ -z "${LAUNCH_EX_SYM}" ]; then
 fi
 if [ -z "${GRAPH_SYM}" ]; then
     echo "FAIL: cuGraphLaunch symbol missing from build/libcuda.so"
+    exit 1
+fi
+if [ -z "${GRAPH_ADD_NODE_SYM}" ]; then
+    echo "FAIL: cuGraphAddKernelNode symbol missing from build/libcuda.so"
+    exit 1
+fi
+if [ -z "${GRAPH_INST_SYM}" ]; then
+    echo "FAIL: cuGraphInstantiate symbol missing from build/libcuda.so"
     exit 1
 fi
 if [ -z "${ALLOC_SYM}" ]; then
@@ -88,6 +100,8 @@ fi
 echo "  -> Found: ${LAUNCH_SYM}"
 echo "  -> Found: ${LAUNCH_EX_SYM}"
 echo "  -> Found: ${GRAPH_SYM}"
+echo "  -> Found: ${GRAPH_ADD_NODE_SYM}"
+echo "  -> Found: ${GRAPH_INST_SYM}"
 echo "  -> Found: ${ALLOC_SYM}"
 echo "  -> Found: ${FREE_SYM}"
 echo "  -> Found: ${ALLOC_ASYNC_SYM}"
@@ -669,5 +683,95 @@ AGENT_PID=""
 rmdir "${CGROUP_DRA}" 2>/dev/null || true
 
 echo "=========================================================="
-echo "ALL LOCAL E2E MILESTONES (1, 2, 3, 4, 5, 9, 11) VERIFIED SUCCESSFULLY!"
+echo "Milestone 12 (v0.4): Dynamic CUDA Graph Node Costing & Active VRAM Enforcement (kill policy)"
+echo "=========================================================="
+CGROUP_M12="/sys/fs/cgroup/ggate-e2e-m12"
+mkdir -p "${CGROUP_M12}"
+CGROUP_ID_M12=$(stat -c '%i' "${CGROUP_M12}")
+
+echo "Starting ggate-agent with --quota ${CGROUP_M12}:6400:64:33554432 and --vram-policy kill..."
+./build/ggate-agent \
+    --libcuda auto \
+    --metrics-addr :9090 \
+    --quota "${CGROUP_M12}:6400:64:33554432" \
+    --max-vram-mb 32 \
+    --vram-policy kill \
+    > /tmp/ggate_agent_m12.log 2>&1 &
+AGENT_PID=$!
+
+echo "Waiting for ggate-agent to start..."
+READY=0
+for i in {1..50}; do
+    if curl -s http://localhost:9090/metrics >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "${READY}" -ne 1 ]; then
+    echo "FAIL: ggate-agent failed to start for Milestone 12. Logs:"
+    cat /tmp/ggate_agent_m12.log
+    exit 1
+fi
+
+sleep 0.2
+
+echo "Running workload_sim in Milestone 12 cgroup with 4-node CUDA graph (duration=3s, vram=16MiB)..."
+(echo $BASHPID > "${CGROUP_M12}/cgroup.procs" && ./build/workload_sim -n 0 -duration 3 -vram 16777216 -graph-launch -graph-nodes 4) > /tmp/sim_m12_graph.log 2>&1
+
+cat /tmp/sim_m12_graph.log
+IOPS_M12=$(grep -o 'iops=[0-9.]*' /tmp/sim_m12_graph.log | cut -d'=' -f2)
+
+echo "Achieved 4-Node CUDA Graph IOPS: ${IOPS_M12} (target: 50.0 from 6400 / (4 * 32) tokens, expected [45.0, 55.0])"
+
+awk -v iops="${IOPS_M12}" 'BEGIN {
+    if (iops >= 45.0 && iops <= 55.0) {
+        printf("  -> 4-Node CUDA Graph IOPS %.2f is within bounds [45.0, 55.0]\n", iops);
+        exit 0;
+    } else {
+        printf("FAIL: 4-Node CUDA Graph IOPS %.2f is out of bounds [45.0, 55.0]\n", iops);
+        exit 1;
+    }
+}'
+
+echo "Running workload_sim with 64 MiB allocation (exceeding 32 MiB quota under vram-policy=kill)..."
+set +e
+(echo $BASHPID > "${CGROUP_M12}/cgroup.procs" && ./build/workload_sim -n 100 -vram 67108864) > /tmp/sim_m12_kill.log 2>&1
+KILL_EXIT=$?
+set -e
+
+cat /tmp/sim_m12_kill.log || true
+echo "Workload process exit code: ${KILL_EXIT} (expected non-zero / 137 from SIGKILL)"
+
+if [ "${KILL_EXIT}" -eq 0 ]; then
+    echo "FAIL: Expected workload_sim to be terminated by SIGKILL, but it exited with 0"
+    exit 1
+fi
+
+if grep -q "Achieved" /tmp/sim_m12_kill.log; then
+    echo "FAIL: Expected 0 kernel launches executed due to immediate SIGKILL upon VRAM quota violation"
+    exit 1
+fi
+
+echo "  -> Process correctly terminated by SIGKILL on VRAM quota breach (0 launches executed)"
+
+sleep 0.2
+METRICS=$(curl -s http://localhost:9090/metrics)
+VRAM_EXCEEDED_M12=$(echo "${METRICS}" | grep "^ggate_vram_quota_exceeded_total{cgroup_id=\"${CGROUP_ID_M12}\".*}" | awk '{print $2}')
+echo "Milestone 12 VRAM Quota Exceeded count: ${VRAM_EXCEEDED_M12:-0}"
+
+if ! awk -v e="${VRAM_EXCEEDED_M12:-0}" 'BEGIN { exit !(e >= 1) }'; then
+    echo "FAIL: Expected ggate_vram_quota_exceeded_total >= 1, got '${VRAM_EXCEEDED_M12}'"
+    exit 1
+fi
+
+echo "[PASS] Milestone 12 (v0.4) verified successfully (Dynamic CUDA graph 4-node costing = 50 IOPS & active VRAM kill policy enforced via SIGKILL)."
+
+kill -TERM "${AGENT_PID}"
+wait "${AGENT_PID}" 2>/dev/null || true
+AGENT_PID=""
+rmdir "${CGROUP_M12}" 2>/dev/null || true
+
+echo "=========================================================="
+echo "ALL LOCAL E2E MILESTONES (1, 2, 3, 4, 5, 9, 11, 12) VERIFIED SUCCESSFULLY!"
 echo "=========================================================="

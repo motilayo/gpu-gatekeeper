@@ -17,9 +17,11 @@ import (
 
 // QuotaSpec defines the rate limiting policy for a target cgroup path or glob.
 type QuotaSpec struct {
-	Target     string
-	RefillRate uint64
-	MaxBurst   uint64
+	Target       string
+	RefillRate   uint64
+	MaxBurst     uint64
+	MaxVramBytes uint64
+	VramPolicy   uint64
 }
 
 // ResolveInode returns the inode number for the given file or directory path.
@@ -96,6 +98,8 @@ func (w *Watcher) SyncOnce() {
 				RefillRateTokensPerSec: spec.RefillRate,
 				MaxBurstTokens:         spec.MaxBurst,
 				CurrentTokens:          spec.MaxBurst,
+				MaxVramBytes:           spec.MaxVramBytes,
+				VramPolicy:             spec.VramPolicy,
 				LastUpdateNs:           0,
 			}
 			if err := w.quotaMap.Put(&inode, &state); err != nil {

@@ -224,7 +224,9 @@ func resolveLibcudaPath(configured string) (string, error) {
 
 func main() {
 	var quotas quotaList
-	flag.Var(&quotas, "quota", "Cgroup quota in format target:refill_rate:max_burst (can be specified multiple times, target can be numeric inode or path/glob)")
+	flag.Var(&quotas, "quota", "Cgroup quota in format target:refill_rate:max_burst[:max_vram_bytes] (can be specified multiple times, target can be numeric inode or path/glob)")
+	vramPolicyStr := flag.String("vram-policy", "audit", "VRAM quota enforcement policy: audit, throttle, or kill")
+	maxVramMb := flag.Uint64("max-vram-mb", 0, "Default maximum VRAM quota in MiB for CLI-configured quotas")
 	libcudaPath := flag.String("libcuda", "./build/libcuda.so", "Path to libcuda.so mock library or 'auto' for driver discovery")
 	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus metrics HTTP address")
 	kubeletPodsURL := flag.String("kubelet-pods-url", "", "HTTP URL returning Kubelet /pods JSON")
@@ -234,6 +236,8 @@ func main() {
 	draClaimsFile := flag.String("dra-claims-file", "", "Path to local JSON file with Kubernetes ResourceClaimList format")
 	cdiDir := flag.String("cdi-dir", "/var/run/cdi", "Path to directory for Container Device Interface (CDI) JSON specs")
 	flag.Parse()
+
+	defaultVramPolicy := k8s.ParseVRAMPolicy(*vramPolicyStr)
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Printf("warning: failed to remove memlock limit: %v", err)
@@ -250,8 +254,8 @@ func main() {
 	// Configure manual CLI quotas
 	for _, q := range quotas {
 		parts := strings.Split(q, ":")
-		if len(parts) != 3 {
-			log.Fatalf("invalid --quota format %q, expected target:refill_rate:max_burst", q)
+		if len(parts) != 3 && len(parts) != 4 {
+			log.Fatalf("invalid --quota format %q, expected target:refill_rate:max_burst[:max_vram_bytes]", q)
 		}
 		target := parts[0]
 		refill, err := strconv.ParseUint(parts[1], 10, 64)
@@ -262,6 +266,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("invalid max_burst in quota %q: %v", q, err)
 		}
+		var maxVram uint64
+		if len(parts) == 4 {
+			maxVram, err = strconv.ParseUint(parts[3], 10, 64)
+			if err != nil {
+				log.Fatalf("invalid max_vram_bytes in quota %q: %v", q, err)
+			}
+		}
+		if maxVram == 0 && *maxVramMb > 0 {
+			maxVram = *maxVramMb * 1024 * 1024
+		}
 
 		// Check if target is a numeric cgroup_id inode
 		cgID, err := strconv.ParseUint(target, 10, 64)
@@ -270,18 +284,22 @@ func main() {
 				RefillRateTokensPerSec: refill,
 				MaxBurstTokens:         maxBurst,
 				CurrentTokens:          maxBurst,
+				MaxVramBytes:           maxVram,
+				VramPolicy:             defaultVramPolicy,
 				LastUpdateNs:           0,
 			}
 			if err := objs.CgroupQuotaMap.Put(&cgID, &state); err != nil {
 				log.Fatalf("pre-populating quota for cgroup %d: %v", cgID, err)
 			}
-			log.Printf("Pre-populated quota for numeric cgroup %d: refill_rate=%d tokens/sec, max_burst=%d", cgID, refill, maxBurst)
+			log.Printf("Pre-populated quota for numeric cgroup %d: refill_rate=%d tokens/sec, max_burst=%d, max_vram=%d bytes, vram_policy=%d", cgID, refill, maxBurst, maxVram, defaultVramPolicy)
 		} else {
 			// Path or glob pattern target for dynamic watcher
 			watcherSpecs = append(watcherSpecs, cgroup.QuotaSpec{
-				Target:     target,
-				RefillRate: refill,
-				MaxBurst:   maxBurst,
+				Target:       target,
+				RefillRate:   refill,
+				MaxBurst:     maxBurst,
+				MaxVramBytes: maxVram,
+				VramPolicy:   defaultVramPolicy,
 			})
 		}
 	}
@@ -297,6 +315,7 @@ func main() {
 
 	// Start Kubernetes workload metadata resolver & annotation quota controller
 	resolver := k8s.NewResolver(objs.CgroupQuotaMap, *kubeletPodsURL, *kubeletPodsFile, *kubeletTokenFile)
+	resolver.SetDefaultVRAMPolicy(defaultVramPolicy)
 	resolver.SetDRAClaimsSource(*draClaimsURL, *draClaimsFile)
 	if *cdiDir != "" {
 		draDriver := dra.NewDriver(*cdiDir)
@@ -343,6 +362,30 @@ func main() {
 		log.Printf("Successfully attached uprobe cuGraphLaunch")
 	}
 
+	kpGraphAddNode, err := ex.Uprobe("cuGraphAddKernelNode", objs.HandleCuGraphAddKernelNode, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uprobe cuGraphAddKernelNode: %v", err)
+	} else {
+		defer kpGraphAddNode.Close()
+		log.Printf("Successfully attached uprobe cuGraphAddKernelNode")
+	}
+
+	kpGraphInst, err := ex.Uprobe("cuGraphInstantiate", objs.HandleCuGraphInstantiate, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uprobe cuGraphInstantiate: %v", err)
+	} else {
+		defer kpGraphInst.Close()
+		log.Printf("Successfully attached uprobe cuGraphInstantiate")
+	}
+
+	kpGraphInstRet, err := ex.Uretprobe("cuGraphInstantiate", objs.HandleCuGraphInstantiateRet, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uretprobe cuGraphInstantiate: %v", err)
+	} else {
+		defer kpGraphInstRet.Close()
+		log.Printf("Successfully attached uretprobe cuGraphInstantiate")
+	}
+
 	kpAlloc, err := ex.Uprobe("cuMemAlloc_v2", objs.HandleCuMemAlloc, nil)
 	if err != nil {
 		log.Fatalf("attaching uprobe cuMemAlloc_v2: %v", err)
@@ -385,7 +428,7 @@ func main() {
 		log.Printf("Successfully attached uprobe cuMemFreeAsync")
 	}
 
-	log.Printf("Successfully attached probes to %s (cuLaunchKernel, cuLaunchKernelEx, cuGraphLaunch, cuMemAlloc_v2, cuMemAllocAsync, cuMemFree_v2, cuMemFreeAsync)", resolvedLibcuda)
+	log.Printf("Successfully attached probes to %s (cuLaunchKernel, cuLaunchKernelEx, cuGraphLaunch, cuGraphAddKernelNode, cuGraphInstantiate, cuMemAlloc_v2, cuMemAllocAsync, cuMemFree_v2, cuMemFreeAsync)", resolvedLibcuda)
 
 	pauseTracker := newWallPauseTracker()
 

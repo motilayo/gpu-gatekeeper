@@ -40,7 +40,8 @@ struct user_pt_regs_arm64 {
 #include "headers/ggate.h"
 
 #define SIGSTOP 19
-#define MAX_PAUSE_NS 10000000ULL          /* 10 ms ceiling per single pause slice */
+#define SIGKILL 9
+#define MAX_PAUSE_NS 50000000ULL          /* 50 ms ceiling per single pause slice */
 #define DEFAULT_GRAPH_LAUNCH_COST 32ULL   /* Default token weight for a cuGraphLaunch replay */
 
 struct {
@@ -68,6 +69,27 @@ struct {
     __type(key, __u64);
     __type(value, struct vram_alloc_entry);
 } vram_allocs_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, __u64);
+} graph_cost_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, struct inflight_graph_inst);
+} inflight_graph_inst_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, __u64);
+} graph_exec_cost_map SEC(".maps");
 
 static __always_inline int handle_launch(struct pt_regs *ctx, __u64 cost)
 {
@@ -205,10 +227,73 @@ int handle_cu_launch_kernel_ex(struct pt_regs *ctx)
     return process_kernel_launch(ctx, cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ, cfg.blockDimX, cfg.blockDimY);
 }
 
+SEC("uprobe/cuGraphAddKernelNode")
+int handle_cu_graph_add_kernel_node(struct pt_regs *ctx)
+{
+    __u64 h_graph = (__u64)PT_REGS_PARM2(ctx);
+    const void *params_ptr = (const void *)PT_REGS_PARM5(ctx);
+    if (!params_ptr)
+        return 0;
+
+    struct cu_kernel_node_params_prefix params = {};
+    if (bpf_probe_read_user(&params, sizeof(params), params_ptr) != 0)
+        return 0;
+
+    __u64 node_cost = ((__u64)params.gridDimX * params.gridDimY * params.gridDimZ * params.blockDimX * params.blockDimY) >> 10;
+    if (node_cost < 1)
+        node_cost = 1;
+
+    __u64 *existing = bpf_map_lookup_elem(&graph_cost_map, &h_graph);
+    if (existing) {
+        __sync_fetch_and_add(existing, node_cost);
+    } else {
+        bpf_map_update_elem(&graph_cost_map, &h_graph, &node_cost, BPF_ANY);
+    }
+    return 0;
+}
+
+SEC("uprobe/cuGraphInstantiate")
+int handle_cu_graph_instantiate(struct pt_regs *ctx)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct inflight_graph_inst inst = {
+        .ph_graph_exec_ptr = (__u64)PT_REGS_PARM1(ctx),
+        .h_graph = (__u64)PT_REGS_PARM2(ctx),
+    };
+    bpf_map_update_elem(&inflight_graph_inst_map, &pid_tgid, &inst, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/cuGraphInstantiate")
+int handle_cu_graph_instantiate_ret(struct pt_regs *ctx)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct inflight_graph_inst *inst = bpf_map_lookup_elem(&inflight_graph_inst_map, &pid_tgid);
+    if (!inst)
+        return 0;
+
+    __u64 ph_ptr = inst->ph_graph_exec_ptr;
+    __u64 h_graph = inst->h_graph;
+    bpf_map_delete_elem(&inflight_graph_inst_map, &pid_tgid);
+
+    __u64 h_graph_exec = 0;
+    if (ph_ptr && bpf_probe_read_user(&h_graph_exec, sizeof(h_graph_exec), (const void *)ph_ptr) == 0 && h_graph_exec != 0) {
+        __u64 *cost_ptr = bpf_map_lookup_elem(&graph_cost_map, &h_graph);
+        if (cost_ptr && *cost_ptr > 0) {
+            __u64 cost = *cost_ptr;
+            bpf_map_update_elem(&graph_exec_cost_map, &h_graph_exec, &cost, BPF_ANY);
+        }
+    }
+    return 0;
+}
+
 SEC("uprobe/cuGraphLaunch")
 int handle_cu_graph_launch(struct pt_regs *ctx)
 {
-    return handle_launch(ctx, DEFAULT_GRAPH_LAUNCH_COST);
+    __u64 h_graph_exec = (__u64)PT_REGS_PARM1(ctx);
+    __u64 *cost_ptr = bpf_map_lookup_elem(&graph_exec_cost_map, &h_graph_exec);
+    __u64 cost = (cost_ptr && *cost_ptr > 0) ? *cost_ptr : DEFAULT_GRAPH_LAUNCH_COST;
+    return handle_launch(ctx, cost);
 }
 
 static __always_inline int process_mem_alloc(__u64 dptr_ptr, __u64 bytesize)
@@ -225,6 +310,24 @@ static __always_inline int process_mem_alloc(__u64 dptr_ptr, __u64 bytesize)
         __u64 prev = __sync_fetch_and_add(&state->allocated_vram_bytes, bytesize);
         if (state->max_vram_bytes > 0 && (prev + bytesize) > state->max_vram_bytes) {
             __sync_fetch_and_add(&state->vram_quota_exceeded, 1);
+            if (state->vram_policy == VRAM_POLICY_THROTTLE) {
+                __sync_fetch_and_add(&state->total_throttled, 1);
+                __sync_fetch_and_add(&state->total_throttled_ns, MAX_PAUSE_NS);
+                struct throttle_event *ev = bpf_ringbuf_reserve(&events_ringbuf, sizeof(struct throttle_event), 0);
+                if (ev) {
+                    ev->timestamp_ns = bpf_ktime_get_ns();
+                    ev->cgroup_id = cgroup_id;
+                    __u64 pid_tgid = bpf_get_current_pid_tgid();
+                    ev->pid = (__u32)(pid_tgid >> 32);
+                    ev->tid = (__u32)(pid_tgid & 0xFFFFFFFF);
+                    ev->deficit_tokens = 0;
+                    ev->requested_sleep_ns = MAX_PAUSE_NS;
+                    bpf_ringbuf_submit(ev, 0);
+                }
+                bpf_send_signal(SIGSTOP);
+            } else if (state->vram_policy == VRAM_POLICY_KILL) {
+                bpf_send_signal(SIGKILL);
+            }
         }
     }
 
