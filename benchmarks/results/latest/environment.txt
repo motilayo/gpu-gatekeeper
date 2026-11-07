@@ -1,0 +1,17 @@
+=== G-Gate Benchmark Environment Fingerprint ===
+Timestamp (UTC): 2026-11-07 11:24:07 UTC
+Git Commit: d030f255b768e8334460d3d526fcbe5f1d431c17 (v0.2)
+Kernel: Linux ip-172-31-47-222 6.8.0-1052-aws #55~22.04.1-Ubuntu SMP Tue Apr  7 04:58:22 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+CPU Model: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+Kernel BTF: -r--r--r-- 1 root root 5.9M Nov  7 11:24 /sys/kernel/btf/vmlinux
+Kernel BTF SHA256: 2d15f29b747d8e6ec393800d9fcc4d552e7118346df07aea5410100226e8f9df
+NVIDIA GPU: GPU 0: Tesla T4 (UUID: GPU-be911a86-1e1c-53fb-b0ff-af31afe0b43b) 
+
+GPU Details:
+name, uuid, driver_version, memory.total [MiB], compute_cap
+Tesla T4, GPU-be911a86-1e1c-53fb-b0ff-af31afe0b43b, 580.126.09, 15360 MiB, 7.5
+Python Interpreter: /opt/pytorch/bin/python3
+PyTorch Version: 2.7.0+cu128 (CUDA 12.8)
+CUDA Library: /lib/x86_64-linux-gnu/libcuda.so.1
+CUDA Library SHA256: e8e541166449da5a1278f40b27a28d072174b31f2941b101a9609b6d1d3aed32
+Go Version: go version go1.27.3 linux/amd64

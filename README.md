@@ -4,15 +4,18 @@ G-Gate is an out-of-band, zero-injection GPU observability and Quality-of-Servic
 
 ---
 
-### Verified Real-Hardware Benchmark (NVIDIA Tesla T4 + PyTorch `2.7.0+cu128`)
+### Publication-Grade Real-Hardware Validation (NVIDIA Tesla T4 + PyTorch `2.7.0+cu128`)
 
-Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4`, `/lib/x86_64-linux-gnu/libcuda.so.1`) running two concurrent PyTorch `torch.matmul` workloads (`10.0s` duration) in separate `cgroup v2` slices with a 20% / 80% token-bucket split:
+Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.8.0-1052-aws`, PyTorch `2.7.0+cu128`, CUDA `12.8`, driver `580.126.09`). Complete raw CSV telemetry and Prometheus metrics are committed in [`benchmarks/results/latest/`](benchmarks/results/latest/). Full reproduction instructions, statistical variances, and latency distributions are documented in the [**Third-Party Validation & Reproducibility Report**](benchmarks/VALIDATION_REPORT.md).
 
-| Tenant Slice | Configured Quota | Achieved PyTorch MatMul IOPS | Intercepted CUDA Launches (`ggate_gpu_launches_total`) | Attributed Active VRAM (`ggate_vram_allocated_bytes`) | Cumulative QoS Pause (`ggate_gpu_throttled_seconds_total`) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **`ggate-pytorch-20`** (20%) | `100,000` tokens/sec | **`1,242.47` matmuls/sec** (`12,425` iters) | `24,856` | `300,024,832 B` (`~286.1 MiB`) | `2.14969 s` (`6,748` throttles) |
-| **`ggate-pytorch-80`** (80%) | `400,000` tokens/sec | **`4,997.14` matmuls/sec** (`49,972` iters) | `99,950` | `300,024,832 B` (`~286.1 MiB`) | `0.48380 s` (`6,631` throttles) |
-| **20% / 80% Ratio** | **Target: `0.2500`** | **Achieved: `0.2486` (99.44% accuracy)** | **Ratio: `0.2487`** | **Zero `LD_PRELOAD` / Zero Crashes** | **Out-of-Band eBPF `uprobe`** |
+| Experiment | Scenario & Workload | Target Hypothesis | Observed Real-Hardware Result | Accuracy / Overhead |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. Attribution Overhead** | Back-to-back $512 \times 512$ `torch.matmul` at $15.2\text{k}$ launches/sec | Median latency impact of eBPF uprobe | Native: $65.03 \ \mu\text{s}$ (p50)<br>G-Gate: $67.43 \ \mu\text{s}$ (p50) | **`+2.40 µs`** median overhead (`<0.05%` on real inference) |
+| **2A. 50/50 Equal QoS** | Two concurrent saturated PyTorch tenants ($200\text{k}$ tok/s each) | Perfect compute parity ($1.00000$ ratio) | Tenant A: $2,512.10$ IOPS (CV: 0.018%)<br>Tenant B: $2,511.57$ IOPS (CV: 0.003%) | **`1.00021`** ratio (**`99.98%`** precision) |
+| **2B. 20/80 Asymmetric QoS** | Priority isolation ($100\text{k}$ vs $400\text{k}$ tokens/sec) | Strict $0.25000$ ratio between tenants | Tenant 20: $1,250.81$ IOPS (p50: $0.95\text{ms}$)<br>Tenant 80: $5,024.81$ IOPS (p50: $0.057\text{ms}$) | **`0.24893`** ratio (**`99.57%`** precision) |
+| **2C. 10/30/60 3-Way QoS** | Multi-tenant proportional shares across three concurrent slices | Target $10\% : 30\% : 60\%$ compute allocation | T10: $627.46$ ($10.005\%$)<br>T30: $1,882.43$ ($30.016\%$)<br>T60: $3,761.63$ ($59.980\%$) | **`1.000 : 3.000 : 5.995`** (**`99.92%`** precision) |
+| **3. CUDA Graph Replay** | Replayed static execution graphs (`cuGraphLaunch` via `torch.cuda.CUDAGraph`) | Rate limit compiled execution without graph disassembly | Graph-20: $196.71$ replays/sec<br>Graph-80: $789.63$ replays/sec | **`0.24912`** ratio (**`99.65%`** precision) |
+| **4. VRAM Lifecycle** | Allocation of $258 \ \text{MiB}$ tensor + buffers, quota audit, and cache purge | Exact reclamation via `cuMemFree_v2` with zero tracking drift | Peak: $300,024,832 \ \text{B}$ ($6$ violations)<br>Post-Free: $29,492,224 \ \text{B}$ | **`258.00 MiB`** reclaimed (**`0-drift`** exact match) |
 
 #### Token-Bucket Physics & Self-Clocking Scheduler Analysis
 

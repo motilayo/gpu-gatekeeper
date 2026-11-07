@@ -1,0 +1,3 @@
+phase,vram_allocated_bytes,vram_quota_bytes,vram_quota_exceeded_total
+during_allocation,3.00024832e+08,1.34217728e+08,6
+after_free,2.9492224e+07,1.34217728e+08,6
