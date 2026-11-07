@@ -1,0 +1,29 @@
+{
+  "label": "isolated-t3",
+  "pid": 2642,
+  "cgroup_id": 7690,
+  "gpu_name": "Tesla T4",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "duration_configured": 60.0,
+  "duration_actual_sec": 64.26433437200001,
+  "requests_completed": 15,
+  "total_generated_tokens": 1920,
+  "tokens_per_sec": 29.876602920772562,
+  "ttft_ms": {
+    "p50": 38.10414999998102,
+    "p95": 38.792782900009115,
+    "mean": 38.2154880666576,
+    "min": 37.82900999999583,
+    "max": 39.496445999930074,
+    "count": 15
+  },
+  "itl_ms": {
+    "p50": 33.346538000046166,
+    "p95": 34.08107700001892,
+    "p99": 34.7927548799953,
+    "mean": 33.41789604881985,
+    "min": 32.90212000001702,
+    "max": 35.064952000084304,
+    "count": 1905
+  }
+}

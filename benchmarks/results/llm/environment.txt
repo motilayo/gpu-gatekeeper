@@ -1,0 +1,17 @@
+=== G-Gate Real LLM Benchmark Environment Fingerprint ===
+Timestamp (UTC): 2026-11-07 14:14:59 UTC
+Git Commit: unknown
+Kernel: Linux ip-172-31-45-114 6.8.0-1052-aws #55~22.04.1-Ubuntu SMP Tue Apr  7 04:58:22 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+NVIDIA GPU: GPU 0: Tesla T4 (UUID: GPU-f5d662e7-78ee-ef0d-7335-64390cf4b90b) 
+
+GPU Details:
+name, uuid, driver_version, memory.total [MiB], compute_cap
+Tesla T4, GPU-f5d662e7-78ee-ef0d-7335-64390cf4b90b, 580.126.09, 15360 MiB, 7.5
+
+Python Interpreter: /opt/pytorch/bin/python3
+PyTorch Version: 2.7.0+cu128 (CUDA 12.8)
+Transformers Version: 5.22.2
+Accelerate Version: 1.15.0
+CUDA Driver Library: /lib/x86_64-linux-gnu/libcuda.so.1
+libcuda.so.1 SHA256: e8e541166449da5a1278f40b27a28d072174b31f2941b101a9609b6d1d3aed32
+Model Configured: Qwen/Qwen2.5-0.5B-Instruct (fallback: TinyLlama/TinyLlama-1.1B-Chat-v1.0)

@@ -1,0 +1,4 @@
+=== Calibration Log ===
+Round 1: rate_20=400000, rate_80=1600000 -> throttled_20=6396, throttled_80=0, tok_s_80=24.69183899161225
+Calibration success! Selected rates: 20%=400000, 80%=1600000
+Final Calibrated Rates: RATE_20=400000, RATE_80=1600000

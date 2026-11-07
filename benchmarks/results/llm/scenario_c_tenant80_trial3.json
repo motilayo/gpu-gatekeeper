@@ -1,0 +1,29 @@
+{
+  "label": "ggate-80-trial3",
+  "pid": 3129,
+  "cgroup_id": 7990,
+  "gpu_name": "Tesla T4",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "duration_configured": 60.0,
+  "duration_actual_sec": 62.287654673999896,
+  "requests_completed": 12,
+  "total_generated_tokens": 1536,
+  "tokens_per_sec": 24.659782231954175,
+  "ttft_ms": {
+    "p50": 41.25896699997611,
+    "p95": 48.36941984991653,
+    "mean": 43.0446089166594,
+    "min": 39.976077999881454,
+    "max": 51.32776699997521,
+    "count": 12
+  },
+  "itl_ms": {
+    "p50": 40.56480800011286,
+    "p95": 47.648674449965256,
+    "p99": 49.856322340006045,
+    "mean": 40.504198664697164,
+    "min": 34.21013699994546,
+    "max": 53.72622799995952,
+    "count": 1524
+  }
+}
