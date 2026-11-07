@@ -1,0 +1,44 @@
+# lima.yaml — G-Gate M1 Pro (arm64) eBPF Development Sandbox
+vmType: "vz"
+rosetta:
+  enabled: true
+  binfmt: true
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+cpus: 4
+memory: "8GiB"
+disk: "30GiB"
+
+mounts:
+  - location: "~"
+    writable: true
+  - location: "/tmp/lima"
+    writable: true
+
+portForwards:
+  - guestPort: 9090
+    hostPort: 9090
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y \
+        build-essential clang llvm libelf-dev libbpf-dev \
+        linux-tools-common linux-tools-$(uname -r) \
+        pkg-config systemd-container
+      # Install latest stable Go
+      GO_VER=$(curl -sL "https://go.dev/VERSION?m=text" | head -n1)
+      curl -fsSL "https://go.dev/dl/${GO_VER}.linux-arm64.tar.gz" -o /tmp/go.tar.gz
+      rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz
+      ln -sf /usr/local/go/bin/go /usr/bin/go
+      ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt
+      rm -f /tmp/go.tar.gz
+      # Generate vmlinux.h from kernel BTF for eBPF CO-RE
+      bpftool btf dump file /sys/kernel/btf/vmlinux format c > /usr/include/vmlinux.h

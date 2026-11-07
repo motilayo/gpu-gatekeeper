@@ -1,0 +1,28 @@
+image:
+  repository: ghcr.io/motilayo/gpu-gatekeeper
+  tag: v0.2.0
+  pullPolicy: IfNotPresent
+
+libcudaPath: /usr/lib/x86_64-linux-gnu/libcuda.so.1
+kubeletPodsUrl: http://127.0.0.1:10255/pods
+metricsPort: 9090
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 15s

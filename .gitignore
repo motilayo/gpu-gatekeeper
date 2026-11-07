@@ -1,0 +1,20 @@
+# Build output
+build/
+
+# Object files (ignore by default, but keep generated bpf objects for go:embed)
+*.o
+!internal/bpf/ggate_*.o
+
+# Spike test binaries
+spikes/**/spike-*
+archive/**/spike-*
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Local exploratory archive
+archive/
+
+# macOS system files
+.DS_Store

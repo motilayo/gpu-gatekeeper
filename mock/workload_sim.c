@@ -1,0 +1,131 @@
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
+typedef int CUresult;
+typedef void* CUfunction;
+typedef unsigned long long CUdeviceptr;
+#define CUDA_SUCCESS 0
+
+extern CUresult cuLaunchKernel(CUfunction f,
+                               unsigned int gridDimX,
+                               unsigned int gridDimY,
+                               unsigned int gridDimZ,
+                               unsigned int blockDimX,
+                               unsigned int blockDimY,
+                               unsigned int blockDimZ,
+                               unsigned int sharedMemBytes,
+                               void *hStream,
+                               void **kernelParams,
+                               void **extra);
+
+extern CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
+extern CUresult cuMemFree_v2(CUdeviceptr dptr);
+
+static unsigned long long get_cgroup_id(void) {
+    FILE *fp = fopen("/proc/self/cgroup", "r");
+    char cgroup_path[1024] = "/sys/fs/cgroup";
+    if (fp) {
+        char line[512];
+        while (fgets(line, sizeof(line), fp)) {
+            line[strcspn(line, "\r\n")] = '\0';
+            if (strncmp(line, "0::", 3) == 0) {
+                const char *rel = line + 3;
+                if (strlen(rel) > 0 && strcmp(rel, "/") != 0) {
+                    snprintf(cgroup_path, sizeof(cgroup_path), "/sys/fs/cgroup%s%s",
+                             (rel[0] == '/') ? "" : "/", rel);
+                }
+                break;
+            }
+        }
+        fclose(fp);
+    }
+    struct stat st;
+    if (stat(cgroup_path, &st) == 0) {
+        return (unsigned long long)st.st_ino;
+    }
+    if (stat("/sys/fs/cgroup", &st) == 0) {
+        return (unsigned long long)st.st_ino;
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[]) {
+    unsigned long long iterations = 10000;
+    double duration = 0.0;
+    size_t vram_bytes = 67108864ULL; /* default 64 MiB */
+    unsigned int grid_x = 128;
+    unsigned int block_x = 256;
+    int free_on_exit = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--n") == 0) && i + 1 < argc) {
+            iterations = strtoull(argv[++i], NULL, 10);
+        } else if ((strcmp(argv[i], "-duration") == 0 || strcmp(argv[i], "--duration") == 0) && i + 1 < argc) {
+            duration = atof(argv[++i]);
+        } else if ((strcmp(argv[i], "-vram") == 0 || strcmp(argv[i], "--vram") == 0) && i + 1 < argc) {
+            vram_bytes = (size_t)strtoull(argv[++i], NULL, 10);
+        } else if ((strcmp(argv[i], "-grid") == 0 || strcmp(argv[i], "--grid") == 0) && i + 1 < argc) {
+            grid_x = (unsigned int)strtoul(argv[++i], NULL, 10);
+        } else if ((strcmp(argv[i], "-block") == 0 || strcmp(argv[i], "--block") == 0) && i + 1 < argc) {
+            block_x = (unsigned int)strtoul(argv[++i], NULL, 10);
+        } else if (strcmp(argv[i], "-free-on-exit") == 0 || strcmp(argv[i], "--free-on-exit") == 0) {
+            free_on_exit = 1;
+        }
+    }
+
+    pid_t pid = getpid();
+    unsigned long long cgroup_id = get_cgroup_id();
+    printf("workload_sim started: pid=%d cgroup_id=%llu vram_alloc=%zu\n",
+           (int)pid, cgroup_id, vram_bytes);
+    fflush(stdout);
+
+    /* Allocate VRAM once before kernel launches */
+    CUdeviceptr dptr = 0;
+    cuMemAlloc_v2(&dptr, vram_bytes);
+
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    unsigned long long launches = 0;
+    if (duration > 0.0) {
+        while (1) {
+            cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            launches++;
+
+            struct timespec current;
+            clock_gettime(CLOCK_MONOTONIC, &current);
+            double cur_elapsed = (double)(current.tv_sec - start.tv_sec) +
+                                 (double)(current.tv_nsec - start.tv_nsec) / 1e9;
+            if (cur_elapsed >= duration) {
+                break;
+            }
+        }
+    } else {
+        for (unsigned long long i = 0; i < iterations; i++) {
+            cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            launches++;
+        }
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    if (free_on_exit) {
+        cuMemFree_v2(dptr);
+    }
+
+    double elapsed_sec = (double)(end.tv_sec - start.tv_sec) +
+                         (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+    double iops = (elapsed_sec > 0.0) ? ((double)launches / elapsed_sec) : 0.0;
+
+    printf("workload_sim finished: launches=%llu elapsed_sec=%.6f iops=%.2f\n",
+           launches, elapsed_sec, iops);
+    fflush(stdout);
+
+    return 0;
+}
