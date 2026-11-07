@@ -13,6 +13,17 @@ SSH_KEY_FILE="${SSH_KEY_FILE:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+check_auth() {
+    if ! command -v aws >/dev/null 2>&1; then
+        echo "Error: AWS CLI is not installed or not in PATH."
+        exit 1
+    fi
+    if ! aws sts get-caller-identity >/dev/null 2>&1; then
+        echo "Error: AWS CLI credentials are missing or expired. Please refresh your AWS credentials (e.g. 'aws sso login' or export AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) and retry."
+        exit 1
+    fi
+}
+
 get_instance_id() {
     aws ec2 describe-instances \
         --region "${REGION}" \
@@ -30,6 +41,7 @@ get_public_ip() {
 }
 
 cmd_up() {
+    check_auth
     echo "=== Provisioning AWS Spot Instance for G-Gate Validation ==="
     echo "Region: ${REGION}, Instance Type: ${INSTANCE_TYPE}"
 
@@ -91,6 +103,7 @@ cmd_up() {
 }
 
 cmd_ssh() {
+    check_auth
     IP=$(get_public_ip)
     if [ -z "${IP}" ] || [ "${IP}" == "None" ]; then
         echo "Error: No running instance found."
@@ -104,6 +117,7 @@ cmd_ssh() {
 }
 
 cmd_run_verify() {
+    check_auth
     IP=$(get_public_ip)
     if [ -z "${IP}" ] || [ "${IP}" == "None" ]; then
         echo "No running instance found. Starting instance first..."
@@ -138,6 +152,7 @@ cmd_run_verify() {
 }
 
 cmd_teardown() {
+    check_auth
     echo "=== Tearing Down AWS Spot Instance ==="
     INSTANCE_IDS=$(aws ec2 describe-instances \
         --region "${REGION}" \

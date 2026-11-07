@@ -236,7 +236,9 @@ func (r *Resolver) SyncOnce() {
 					prevPol, alreadyEnrolled := r.enrolled[inode]
 					if !alreadyEnrolled || prevPol != newPol {
 						var existingState bpf.CgroupQuotaState
-						_ = r.quotaMap.Lookup(&inode, &existingState)
+						if r.quotaMap != nil {
+							_ = r.quotaMap.Lookup(&inode, &existingState)
+						}
 
 						existingState.RefillRateTokensPerSec = refillRate
 						existingState.MaxBurstTokens = maxBurst
@@ -248,7 +250,9 @@ func (r *Resolver) SyncOnce() {
 							existingState.VramQuotaExceeded = 1
 						}
 
-						if err := r.quotaMap.Put(&inode, &existingState); err == nil {
+						if r.quotaMap == nil {
+							r.enrolled[inode] = newPol
+						} else if err := r.quotaMap.Put(&inode, &existingState); err == nil {
 							r.enrolled[inode] = newPol
 							log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d",
 								path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)

@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [ -d "${HOME}/google-cloud-sdk/bin" ]; then
+    export PATH="${HOME}/google-cloud-sdk/bin:${PATH}"
+fi
+if [ -z "${CLOUDSDK_PYTHON:-}" ] && [ -x "/opt/homebrew/bin/python3.11" ]; then
+    export CLOUDSDK_PYTHON="/opt/homebrew/bin/python3.11"
+fi
+
 # GCP Spot Smoke-Test for G-Gate Real GPU Validation
 # Defaults: g2-standard-4 (NVIDIA L4 GPU) Spot (~$0.22/hr) in us-central1-a
 # with built-in GCP 90-minute hard termination dead-man's switch (--max-run-duration=90m)
@@ -12,11 +19,25 @@ INSTANCE_NAME="ggate-spot-smoke"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+check_auth() {
+    if ! command -v gcloud >/dev/null 2>&1; then
+        echo "Error: gcloud CLI is not installed or not in PATH."
+        exit 1
+    fi
+    ACTIVE_ACCT=$(gcloud auth list --filter=status:ACTIVE --format="value(account)" 2>/dev/null || true)
+    if [ -z "${ACTIVE_ACCT}" ]; then
+        echo "Error: No active gcloud authenticated account found."
+        echo "Please log in using: gcloud auth login"
+        exit 1
+    fi
+}
+
 instance_exists() {
     gcloud compute instances describe "${INSTANCE_NAME}" --zone="${ZONE}" >/dev/null 2>&1
 }
 
 cmd_up() {
+    check_auth
     echo "=== Provisioning GCP Spot Instance for G-Gate Validation ==="
     echo "Zone: ${ZONE}, Machine Type: ${MACHINE_TYPE}"
 
@@ -42,6 +63,7 @@ cmd_up() {
 }
 
 cmd_ssh() {
+    check_auth
     if ! instance_exists; then
         echo "Error: Instance ${INSTANCE_NAME} does not exist. Run '$0 up' first."
         exit 1
@@ -50,6 +72,7 @@ cmd_ssh() {
 }
 
 cmd_run_verify() {
+    check_auth
     if ! instance_exists; then
         echo "Instance does not exist. Creating instance first..."
         cmd_up
@@ -77,6 +100,7 @@ cmd_run_verify() {
 }
 
 cmd_teardown() {
+    check_auth
     echo "=== Tearing Down GCP Spot Instance ==="
     if instance_exists; then
         echo "Deleting instance ${INSTANCE_NAME} in zone ${ZONE}..."

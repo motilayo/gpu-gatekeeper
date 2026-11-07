@@ -33,6 +33,10 @@ jobs:
           sudo bpftool btf dump file /sys/kernel/btf/vmlinux format c | sudo tee /usr/include/vmlinux.h > /dev/null
           ls -lh /usr/include/vmlinux.h
 
+      - name: Run Unit Tests
+        run: |
+          make test-unit
+
       - name: Run End-to-End Test Suite
         run: |
           make test-e2e
