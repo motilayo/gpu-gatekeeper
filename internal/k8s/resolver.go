@@ -23,9 +23,10 @@ import (
 
 // WorkloadMeta holds Kubernetes workload identity for a cgroup.
 type WorkloadMeta struct {
-	Namespace string
-	Pod       string
-	Container string
+	Namespace     string
+	Pod           string
+	Container     string
+	ResourceClaim string
 }
 
 type podList struct {
@@ -70,7 +71,7 @@ type containerStatus struct {
 	ContainerID string `json:"containerID"`
 }
 
-// Kubernetes DRA resource.k8s.io/v1 ResourceClaim structures
+// Kubernetes DRA resource.k8s.io/v1 and resource.k8s.io/v1beta1 ResourceClaim structures
 type resourceClaimList struct {
 	Items []resourceClaimItem `json:"items"`
 }
@@ -237,7 +238,7 @@ func (r *Resolver) SetDRAClaimsSource(claimsURL, claimsFile string) {
 	r.claimsFile = claimsFile
 }
 
-// SetDRADriver registers the DRA driver for automated CDI spec generation upon claim discovery.
+// SetDRADriver registers the DRA driver for automated CDI spec generation and in-memory claim cache access.
 func (r *Resolver) SetDRADriver(d *dra.Driver) {
 	r.draDriver = d
 }
@@ -313,14 +314,53 @@ func (r *Resolver) fetchResourceClaims() (map[string]resourceClaimItem, error) {
 			return nil, err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+
+		if resp.StatusCode == http.StatusNotFound {
+			// Fallback: Kubernetes 1.34 / 1.31 DRA API transition from resource.k8s.io/v1 to v1beta1
+			fallbackURL := ""
+			if strings.Contains(r.claimsURL, "/apis/resource.k8s.io/v1/") {
+				fallbackURL = strings.Replace(r.claimsURL, "/apis/resource.k8s.io/v1/", "/apis/resource.k8s.io/v1beta1/", 1)
+			} else if strings.Contains(r.claimsURL, "/resource.k8s.io/v1/") {
+				fallbackURL = strings.Replace(r.claimsURL, "/resource.k8s.io/v1/", "/resource.k8s.io/v1beta1/", 1)
+			} else if strings.Contains(r.claimsURL, "/v1/resourceclaims") {
+				fallbackURL = strings.Replace(r.claimsURL, "/v1/resourceclaims", "/v1beta1/resourceclaims", 1)
+			}
+
+			if fallbackURL != "" {
+				reqFallback, errFB := http.NewRequest("GET", fallbackURL, nil)
+				if errFB == nil {
+					if r.tokenFile != "" {
+						if tokenBytes, err := os.ReadFile(r.tokenFile); err == nil && len(tokenBytes) > 0 {
+							token := strings.TrimSpace(string(tokenBytes))
+							if token != "" {
+								reqFallback.Header.Set("Authorization", "Bearer "+token)
+							}
+						}
+					}
+					respFB, errFB := r.httpClient.Do(reqFallback)
+					if errFB == nil {
+						defer respFB.Body.Close()
+						if respFB.StatusCode == http.StatusOK {
+							dataFB, errFB := io.ReadAll(respFB.Body)
+							if errFB == nil {
+								body = dataFB
+							}
+						}
+					}
+				}
+			}
+			if body == nil {
+				return nil, fmt.Errorf("DRA claims server returned HTTP 404 (and fallback v1beta1 failed)")
+			}
+		} else if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("DRA claims server returned HTTP %d", resp.StatusCode)
+		} else {
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err
+			}
+			body = data
 		}
-		data, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		body = data
 	} else {
 		return nil, nil
 	}
@@ -400,25 +440,25 @@ func (r *Resolver) SyncOnce() {
 					containerName = "pod"
 				}
 
-				newInodeToMeta[inode] = WorkloadMeta{
-					Namespace: pod.Metadata.Namespace,
-					Pod:       pod.Metadata.Name,
-					Container: containerName,
-				}
-
 				var refillRate uint64
 				var maxBurst uint64
 				var maxVramBytes uint64
+				var boundClaimName string
+				var boundClaimUID string
 
-				// 1. Check if the Pod has any bound Kubernetes DRA ResourceClaim
+				// 1. Check if the Pod has any bound Kubernetes DRA ResourceClaim via claims API/file
 				var boundClaim *resourceClaimItem
 				for _, rcs := range pod.Status.ResourceClaimStatuses {
 					if rcs.ResourceClaimName != "" {
 						if c, ok := claims[pod.Metadata.Namespace+"/"+rcs.ResourceClaimName]; ok {
 							boundClaim = &c
+							boundClaimName = c.Metadata.Name
+							boundClaimUID = c.Metadata.UID
 							break
 						} else if c, ok := claims[rcs.ResourceClaimName]; ok {
 							boundClaim = &c
+							boundClaimName = c.Metadata.Name
+							boundClaimUID = c.Metadata.UID
 							break
 						}
 					}
@@ -428,13 +468,68 @@ func (r *Resolver) SyncOnce() {
 						if rc.ResourceClaimName != "" {
 							if c, ok := claims[pod.Metadata.Namespace+"/"+rc.ResourceClaimName]; ok {
 								boundClaim = &c
+								boundClaimName = c.Metadata.Name
+								boundClaimUID = c.Metadata.UID
 								break
 							} else if c, ok := claims[rc.ResourceClaimName]; ok {
 								boundClaim = &c
+								boundClaimName = c.Metadata.Name
+								boundClaimUID = c.Metadata.UID
 								break
 							}
 						}
 					}
+				}
+
+				// If not found in polled claims, check if it was pre-cached in Driver (Guardrail 1: NodePrepareResource ran before cgroup v2 created or before API poll)
+				if boundClaim == nil && r.draDriver != nil {
+					for _, rcs := range pod.Status.ResourceClaimStatuses {
+						if rcs.ResourceClaimName != "" {
+							if prep, ok := r.draDriver.GetPreparedClaimByName(pod.Metadata.Namespace, rcs.ResourceClaimName); ok {
+								boundClaimName = prep.ClaimName
+								boundClaimUID = prep.ClaimUID
+								refillRate = prep.TokensPerSec
+								maxBurst = prep.BurstTokens
+								maxVramBytes = prep.MaxVramBytes
+								break
+							} else if prep, ok := r.draDriver.GetPreparedClaim(rcs.ResourceClaimName); ok {
+								boundClaimName = prep.ClaimName
+								boundClaimUID = prep.ClaimUID
+								refillRate = prep.TokensPerSec
+								maxBurst = prep.BurstTokens
+								maxVramBytes = prep.MaxVramBytes
+								break
+							}
+						}
+					}
+					if boundClaimName == "" {
+						for _, rc := range pod.Spec.ResourceClaims {
+							if rc.ResourceClaimName != "" {
+								if prep, ok := r.draDriver.GetPreparedClaimByName(pod.Metadata.Namespace, rc.ResourceClaimName); ok {
+									boundClaimName = prep.ClaimName
+									boundClaimUID = prep.ClaimUID
+									refillRate = prep.TokensPerSec
+									maxBurst = prep.BurstTokens
+									maxVramBytes = prep.MaxVramBytes
+									break
+								} else if prep, ok := r.draDriver.GetPreparedClaim(rc.ResourceClaimName); ok {
+									boundClaimName = prep.ClaimName
+									boundClaimUID = prep.ClaimUID
+									refillRate = prep.TokensPerSec
+									maxBurst = prep.BurstTokens
+									maxVramBytes = prep.MaxVramBytes
+									break
+								}
+							}
+						}
+					}
+				}
+
+				newInodeToMeta[inode] = WorkloadMeta{
+					Namespace:     pod.Metadata.Namespace,
+					Pod:           pod.Metadata.Name,
+					Container:     containerName,
+					ResourceClaim: boundClaimName,
 				}
 
 				if boundClaim != nil {
@@ -610,9 +705,9 @@ func (r *Resolver) SyncOnce() {
 							r.enrolled[inode] = newPol
 						} else if err := r.quotaMap.Put(&inode, &existingState); err == nil {
 							r.enrolled[inode] = newPol
-							if boundClaim != nil {
+							if boundClaimName != "" {
 								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from DRA ResourceClaim %s (pod %s/%s): refill_rate=%d, burst=%d, max_vram_bytes=%d",
-									path, inode, boundClaim.Metadata.Name, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+									path, inode, boundClaimName, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
 							} else {
 								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d",
 									path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
@@ -622,15 +717,15 @@ func (r *Resolver) SyncOnce() {
 						}
 
 						// Automatically prepare CDI spec if DRA driver is configured
-						if r.draDriver != nil && boundClaim != nil {
-							claimUID := boundClaim.Metadata.UID
-							if claimUID == "" {
-								claimUID = boundClaim.Metadata.Name
+						if r.draDriver != nil && boundClaimName != "" {
+							uid := boundClaimUID
+							if uid == "" {
+								uid = boundClaimName
 							}
 							_, _ = r.draDriver.NodePrepareResource(dra.PreparedClaim{
-								ClaimUID:     claimUID,
-								ClaimName:    boundClaim.Metadata.Name,
-								Namespace:    boundClaim.Metadata.Namespace,
+								ClaimUID:     uid,
+								ClaimName:    boundClaimName,
+								Namespace:    pod.Metadata.Namespace,
 								DeviceID:     "gpu-0",
 								TokensPerSec: refillRate,
 								BurstTokens:  maxBurst,
@@ -650,9 +745,10 @@ func (r *Resolver) SyncOnce() {
 				base = "root"
 			}
 			newInodeToMeta[inode] = WorkloadMeta{
-				Namespace: "host",
-				Pod:       base,
-				Container: "default",
+				Namespace:     "host",
+				Pod:           base,
+				Container:     "default",
+				ResourceClaim: "",
 			}
 		}
 	}
@@ -684,16 +780,18 @@ func (r *Resolver) LookupMeta(inode uint64) WorkloadMeta {
 			base = "root"
 		}
 		return WorkloadMeta{
-			Namespace: "host",
-			Pod:       base,
-			Container: "default",
+			Namespace:     "host",
+			Pod:           base,
+			Container:     "default",
+			ResourceClaim: "",
 		}
 	}
 
 	return WorkloadMeta{
-		Namespace: "unknown",
-		Pod:       "unknown",
-		Container: "unknown",
+		Namespace:     "unknown",
+		Pod:           "unknown",
+		Container:     "unknown",
+		ResourceClaim: "",
 	}
 }
 

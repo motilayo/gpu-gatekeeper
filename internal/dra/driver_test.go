@@ -60,6 +60,8 @@ func TestDRADriverPrepareAndUnprepareCDISpec(t *testing.T) {
 	}
 
 	foundTokensEnv := false
+	foundResourceClaimEnv := false
+	foundClaimUIDEnv := false
 	for _, env := range device.ContainerEdits.Env {
 		if strings.HasPrefix(env, "G_GATE_TOKENS_PER_SEC=") {
 			foundTokensEnv = true
@@ -67,15 +69,39 @@ func TestDRADriverPrepareAndUnprepareCDISpec(t *testing.T) {
 				t.Errorf("unexpected env: got %q, want %q", env, "G_GATE_TOKENS_PER_SEC=6400")
 			}
 		}
+		if env == "GGATE_RESOURCE_CLAIM=llama3-gpu-claim" {
+			foundResourceClaimEnv = true
+		}
+		if env == "GGATE_CLAIM_UID=1111-2222" {
+			foundClaimUIDEnv = true
+		}
 	}
 	if !foundTokensEnv {
 		t.Errorf("G_GATE_TOKENS_PER_SEC environment variable missing in CDI edits")
 	}
+	if !foundResourceClaimEnv {
+		t.Errorf("GGATE_RESOURCE_CLAIM environment variable missing in CDI edits")
+	}
+	if !foundClaimUIDEnv {
+		t.Errorf("GGATE_CLAIM_UID environment variable missing in CDI edits")
+	}
 
-	// Verify GetPreparedClaim
+	// If /dev/nvidiactl is not present on this host, deviceNodes must be empty/omitted
+	if _, err := os.Stat("/dev/nvidiactl"); err != nil {
+		if len(device.ContainerEdits.DeviceNodes) != 0 {
+			t.Errorf("expected 0 device nodes when /dev/nvidiactl is absent, got %d", len(device.ContainerEdits.DeviceNodes))
+		}
+	}
+
+	// Verify GetPreparedClaim & GetPreparedClaimByName
 	savedClaim, found := driver.GetPreparedClaim("1111-2222")
 	if !found || savedClaim.TokensPerSec != 6400 {
 		t.Fatalf("GetPreparedClaim failed or returned invalid data: %+v", savedClaim)
+	}
+
+	byNameClaim, foundByName := driver.GetPreparedClaimByName("ai-prod", "llama3-gpu-claim")
+	if !foundByName || byNameClaim.ClaimUID != "1111-2222" {
+		t.Fatalf("GetPreparedClaimByName failed or returned invalid data: %+v", byNameClaim)
 	}
 
 	// Test NodeUnprepareResource

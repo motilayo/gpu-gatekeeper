@@ -617,9 +617,9 @@ METRICS=$(curl -s http://localhost:9090/metrics)
 echo "Scraped DRA Pod metrics:"
 echo "${METRICS}" | grep "vllm-dra-pod" || true
 
-POD_METRIC=$(echo "${METRICS}" | grep 'namespace="ai-prod"' | grep 'pod="vllm-dra-pod"' | grep 'container="vllm"' || true)
+POD_METRIC=$(echo "${METRICS}" | grep 'namespace="ai-prod"' | grep 'pod="vllm-dra-pod"' | grep 'container="vllm"' | grep 'resource_claim="vllm-dra-claim-01"' || true)
 if [ -z "${POD_METRIC}" ]; then
-    echo "FAIL: Missing expected Kubernetes labels namespace=ai-prod, pod=vllm-dra-pod, container=vllm"
+    echo "FAIL: Missing expected Kubernetes labels namespace=ai-prod, pod=vllm-dra-pod, container=vllm, resource_claim=vllm-dra-claim-01"
     exit 1
 fi
 
@@ -644,6 +644,16 @@ if [ ! -f "/tmp/ggate_cdi_test/gpu.g-gate.io.json" ]; then
 fi
 if ! grep -q "claim-dra-claim-uid-01" /tmp/ggate_cdi_test/gpu.g-gate.io.json; then
     echo "FAIL: Expected claim-dra-claim-uid-01 in /tmp/ggate_cdi_test/gpu.g-gate.io.json"
+    cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
+    exit 1
+fi
+if ! grep -q "GGATE_RESOURCE_CLAIM=vllm-dra-claim-01" /tmp/ggate_cdi_test/gpu.g-gate.io.json; then
+    echo "FAIL: Expected GGATE_RESOURCE_CLAIM=vllm-dra-claim-01 in /tmp/ggate_cdi_test/gpu.g-gate.io.json"
+    cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
+    exit 1
+fi
+if ! grep -q "GGATE_CLAIM_UID=dra-claim-uid-01" /tmp/ggate_cdi_test/gpu.g-gate.io.json; then
+    echo "FAIL: Expected GGATE_CLAIM_UID=dra-claim-uid-01 in /tmp/ggate_cdi_test/gpu.g-gate.io.json"
     cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
     exit 1
 fi

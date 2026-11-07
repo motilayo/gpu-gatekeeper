@@ -110,6 +110,19 @@ func (d *Driver) GetPreparedClaim(claimUID string) (PreparedClaim, bool) {
 	return c, ok
 }
 
+// GetPreparedClaimByName returns a registered prepared claim by its namespace and claim name.
+func (d *Driver) GetPreparedClaimByName(namespace, claimName string) (PreparedClaim, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	for _, c := range d.claims {
+		if c.ClaimName == claimName && (namespace == "" || c.Namespace == "" || c.Namespace == namespace) {
+			return c, true
+		}
+	}
+	return PreparedClaim{}, false
+}
+
 func (d *Driver) writeCDISpecLocked() error {
 	if d.cdiDir == "" {
 		return nil
@@ -124,25 +137,32 @@ func (d *Driver) writeCDISpecLocked() error {
 		Devices:    make([]CDIDevice, 0, len(d.claims)),
 	}
 
+	// Hardware-safe device nodes: ONLY check and include if /dev/nvidiactl is present on the host
 	var commonNodes []CDIDeviceNode
-	for _, dev := range []string{"/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia0"} {
-		if _, err := os.Stat(dev); err == nil {
-			commonNodes = append(commonNodes, CDIDeviceNode{
-				Path:     dev,
-				HostPath: dev,
-			})
+	if _, err := os.Stat("/dev/nvidiactl"); err == nil {
+		for _, dev := range []string{"/dev/nvidiactl", "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/nvidia0"} {
+			if _, sErr := os.Stat(dev); sErr == nil {
+				commonNodes = append(commonNodes, CDIDeviceNode{
+					Path:     dev,
+					HostPath: dev,
+				})
+			}
 		}
 	}
 
 	for uid, claim := range d.claims {
 		env := []string{
+			fmt.Sprintf("GGATE_CLAIM_UID=%s", uid),
 			fmt.Sprintf("G_GATE_CLAIM_UID=%s", uid),
 			fmt.Sprintf("G_GATE_TOKENS_PER_SEC=%d", claim.TokensPerSec),
 			fmt.Sprintf("G_GATE_BURST_TOKENS=%d", claim.BurstTokens),
 			fmt.Sprintf("G_GATE_MAX_VRAM_BYTES=%d", claim.MaxVramBytes),
 		}
 		if claim.ClaimName != "" {
-			env = append(env, fmt.Sprintf("G_GATE_CLAIM_NAME=%s", claim.ClaimName))
+			env = append(env,
+				fmt.Sprintf("GGATE_RESOURCE_CLAIM=%s", claim.ClaimName),
+				fmt.Sprintf("G_GATE_CLAIM_NAME=%s", claim.ClaimName),
+			)
 		}
 		if claim.Namespace != "" {
 			env = append(env, fmt.Sprintf("G_GATE_NAMESPACE=%s", claim.Namespace))

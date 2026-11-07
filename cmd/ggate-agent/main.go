@@ -77,7 +77,7 @@ type bpfCollector struct {
 }
 
 func newBPFCollector(quotaMap *ebpf.Map, resolver *k8s.Resolver, pauseTracker *wallPauseTracker) *bpfCollector {
-	labels := []string{"cgroup_id", "namespace", "pod", "container"}
+	labels := []string{"cgroup_id", "namespace", "pod", "container", "resource_claim"}
 	return &bpfCollector{
 		quotaMap:     quotaMap,
 		resolver:     resolver,
@@ -148,37 +148,37 @@ func (c *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 			c.launchesDesc,
 			prometheus.CounterValue,
 			float64(state.TotalLaunches),
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.throttledDesc,
 			prometheus.CounterValue,
 			float64(state.TotalThrottled),
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.throttledSecDesc,
 			prometheus.CounterValue,
 			float64(throttledNs)/1e9,
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.vramDesc,
 			prometheus.GaugeValue,
 			float64(state.AllocatedVramBytes),
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.vramQuotaDesc,
 			prometheus.GaugeValue,
 			float64(state.MaxVramBytes),
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 		ch <- prometheus.MustNewConstMetric(
 			c.vramQuotaExceedDesc,
 			prometheus.CounterValue,
 			float64(state.VramQuotaExceeded),
-			cgStr, meta.Namespace, meta.Pod, meta.Container,
+			cgStr, meta.Namespace, meta.Pod, meta.Container, meta.ResourceClaim,
 		)
 	}
 	if err := iter.Err(); err != nil {
