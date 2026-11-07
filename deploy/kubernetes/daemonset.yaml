@@ -71,10 +71,10 @@ spec:
           effect: NoSchedule
       containers:
         - name: ggate-agent
-          image: ghcr.io/motilayo/gpu-gatekeeper:latest
+          image: ghcr.io/motilayo/gpu-gatekeeper:v0.5.1
           imagePullPolicy: IfNotPresent
           command:
-            - /usr/local/bin/ggate-agent
+            - /ggate-agent
             - --libcuda=auto
             - --metrics-addr=:9090
             - --kubelet-pods-url=https://127.0.0.1:10250/pods

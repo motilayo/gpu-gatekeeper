@@ -1,5 +1,7 @@
 # G-Gate v2: eBPF GPU Attribution & QoS Governor
 
+> **Status: alpha.** Validated on a single NVIDIA Tesla T4 and in CI with a mock libcuda; not yet run in production. Feedback and issue reports welcome.
+
 G-Gate is an out-of-band, zero-injection GPU observability and Quality-of-Service (QoS) governor for Linux and Kubernetes. It intercepts user-space GPU driver API calls via eBPF `uprobes`, attributes GPU compute launches and active VRAM allocations to `cgroup v2` inodes and Kubernetes Pods/Containers, exports per-tenant Prometheus metrics, and enforces compute quotas via nanosecond token-bucket rate limiting and `SIGSTOP`/`SIGCONT` micro-pausing.
 
 ---
@@ -64,6 +66,18 @@ For detailed sequence diagrams (throttle loop, VRAM pointer tracking, CUDA Graph
 
 ---
 
+## Known Limitations
+
+- **Submission-Time Interception:** G-Gate throttles before CUDA driver submission; it cannot preempt or interrupt an already-executing kernel mid-flight.
+- **Launch Cost Heuristic:** Token cost proxy `(gridDim * blockDim) >> 10` accurately models compute-bound grid launches but may under-charge pathological long-running kernels with small grid dimensions.
+- **CUDA Stream Capture Graphs:** CUDA Graphs created via stream capture (`torch.cuda.CUDAGraph`, vLLM, TensorRT-LLM) are metered at a flat 32 tokens per replay (`cuGraphLaunch`). Per-node costing is only active for explicit `cuGraphAddKernelNode` constructions.
+- **Process-Wide Pausing:** Throttling via `SIGSTOP`/`SIGCONT` micro-pauses the entire OS process, not individual threads.
+- **Cgroup-Level Quotas:** Quotas are enforced per cgroup v2 container, not per physical GPU device. Multi-GPU processes sharing a container share a single token bucket.
+- **Hardware Ecosystem:** Supports NVIDIA CUDA drivers only (no AMD ROCm support currently).
+- **Privileged DaemonSet:** Requires node-level privileges (`CAP_BPF`, `CAP_KILL`, `hostPID: true`). See [SECURITY.md](SECURITY.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
 ## Features
 
 - **Zero-Injection Observability:** Intercepts `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuGraphAddKernelNode`, `cuGraphInstantiate`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync` without modifying container images or injecting `LD_PRELOAD`.
@@ -80,6 +94,29 @@ For detailed sequence diagrams (throttle loop, VRAM pointer tracking, CUDA Graph
 - **Production Packaging:** Multi-stage `Dockerfile`, Helm chart (`deploy/helm/ggate`), GitHub Actions E2E CI (`.github/workflows/ci.yml`), and pre-built Grafana dashboard (`deploy/grafana/ggate-dashboard.json`).
 - **Built-in Live Web Console & Telemetry API (`GET /` & `GET /api/v1/tenants`):** Zero-dependency, real-time dark-mode web console and JSON telemetry endpoint served directly on `:9090` for instant per-tenant observability without requiring Prometheus or Grafana.
 - **$0 Local Mock Development:** Full multi-architecture development on Apple Silicon macOS via Lima VM without requiring physical NVIDIA GPUs.
+
+---
+
+## Quick Install (Helm)
+
+Install the G-Gate DaemonSet directly from the release tarball (OCI registry install is not used):
+
+```bash
+helm install ggate https://github.com/motilayo/gpu-gatekeeper/releases/download/v0.5.1/ggate-0.5.1.tgz \
+    -n ggate-system \
+    --create-namespace
+```
+
+To access the built-in live console:
+```bash
+kubectl port-forward -n ggate-system ds/ggate 9090:9090
+```
+Then open [http://localhost:9090/](http://localhost:9090/) in your browser.
+
+**Requirements:**
+- Linux 5.8+ with BTF enabled (`/sys/kernel/btf/vmlinux`)
+- `cgroup v2` unified hierarchy
+- NVIDIA GPU and driver loaded on host nodes
 
 ---
 
