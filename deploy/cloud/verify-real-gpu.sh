@@ -23,14 +23,28 @@ fi
 echo "GPU detected:"
 nvidia-smi -L
 
-# 2. Check kernel BTF support
+# 2. Discover Python interpreter with PyTorch
+PYTHON_BIN=""
+for candidate in /opt/pytorch/bin/python3 /opt/conda/envs/pytorch/bin/python3 /opt/conda/bin/python3 python3; do
+    if command -v "${candidate}" &>/dev/null && "${candidate}" -c "import torch" &>/dev/null; then
+        PYTHON_BIN="${candidate}"
+        break
+    fi
+done
+if [ -z "${PYTHON_BIN}" ]; then
+    echo "ERROR: Could not find python3 with PyTorch installed."
+    exit 1
+fi
+echo "Using Python with PyTorch: ${PYTHON_BIN} ($(${PYTHON_BIN} -c 'import torch; print(torch.__version__)'))"
+
+# 3. Check kernel BTF support
 if [ ! -f "/sys/kernel/btf/vmlinux" ]; then
     echo "ERROR: /sys/kernel/btf/vmlinux not found. Linux kernel with BTF enabled is required for eBPF CO-RE."
     exit 1
 fi
 echo "Kernel BTF: /sys/kernel/btf/vmlinux present."
 
-# 3. Discover libcuda.so.1 path
+# 4. Discover libcuda.so.1 path
 LIBCUDA_PATH=""
 if command -v ldconfig &>/dev/null; then
     LIBCUDA_PATH=$(ldconfig -p 2>/dev/null | awk '/libcuda\.so\.1 / {print $NF; exit}')
@@ -52,7 +66,7 @@ if [ -z "${LIBCUDA_PATH}" ] || [ ! -f "${LIBCUDA_PATH}" ]; then
 fi
 echo "Located CUDA Driver Library: ${LIBCUDA_PATH}"
 
-# 4. Check/Install Go 1.24+ if needed
+# 5. Check/Install Go 1.24+ if needed
 if ! command -v go &>/dev/null || ! go version | grep -qE 'go1\.(2[4-9]|[3-9][0-9])'; then
     echo "Installing latest stable Go from go.dev..."
     ARCH=$(uname -m)
@@ -66,13 +80,13 @@ if ! command -v go &>/dev/null || ! go version | grep -qE 'go1\.(2[4-9]|[3-9][0-
 fi
 echo "Go toolchain: $(go version)"
 
-# 5. Build ggate-agent
+# 6. Build ggate-agent
 echo "Building ggate-agent..."
 mkdir -p build
 go build -o build/ggate-agent ./cmd/ggate-agent
 echo "Built build/ggate-agent successfully."
 
-# 6. Setup cgroups and cleanup trap
+# 7. Setup cgroups and cleanup trap
 CGROUP_20="/sys/fs/cgroup/ggate-pytorch-20"
 CGROUP_80="/sys/fs/cgroup/ggate-pytorch-80"
 AGENT_PID=""
@@ -97,13 +111,13 @@ rmdir "${CGROUP_80}" 2>/dev/null || true
 mkdir -p "${CGROUP_20}"
 mkdir -p "${CGROUP_80}"
 
-# 7. Start ggate-agent
+# 8. Start ggate-agent with 20% / 80% quotas
 echo "Starting ggate-agent on real GPU..."
 ./build/ggate-agent \
     --libcuda "${LIBCUDA_PATH}" \
     --metrics-addr :9090 \
-    --quota /sys/fs/cgroup/ggate-pytorch-20:20000:400 \
-    --quota /sys/fs/cgroup/ggate-pytorch-80:80000:1600 \
+    --quota /sys/fs/cgroup/ggate-pytorch-20:100000:10000 \
+    --quota /sys/fs/cgroup/ggate-pytorch-80:400000:40000 \
     > /tmp/ggate_agent_real.log 2>&1 &
 AGENT_PID=$!
 
@@ -126,12 +140,12 @@ echo "ggate-agent running (PID: ${AGENT_PID})."
 # Allow dynamic cgroup watcher to enroll cgroups
 sleep 0.3
 
-# 8. Run concurrent PyTorch workloads
+# 9. Run concurrent PyTorch workloads
 echo "Launching concurrent PyTorch benchmark workloads (10 seconds)..."
-(echo $BASHPID > "${CGROUP_20}/cgroup.procs" && python3 deploy/cloud/pytorch_bench.py --duration 10 --label tenant-20) > /tmp/pytorch_20.log 2>&1 &
+(echo $BASHPID > "${CGROUP_20}/cgroup.procs" && "${PYTHON_BIN}" deploy/cloud/pytorch_bench.py --duration 10 --matrix-size 256 --label tenant-20) > /tmp/pytorch_20.log 2>&1 &
 PID_20=$!
 
-(echo $BASHPID > "${CGROUP_80}/cgroup.procs" && python3 deploy/cloud/pytorch_bench.py --duration 10 --label tenant-80) > /tmp/pytorch_80.log 2>&1 &
+(echo $BASHPID > "${CGROUP_80}/cgroup.procs" && "${PYTHON_BIN}" deploy/cloud/pytorch_bench.py --duration 10 --matrix-size 256 --label tenant-80) > /tmp/pytorch_80.log 2>&1 &
 PID_80=$!
 
 wait "${PID_20}" || { echo "PyTorch tenant-20 failed:"; cat /tmp/pytorch_20.log; exit 1; }
@@ -146,8 +160,13 @@ cat /tmp/pytorch_80.log
 IOPS_20=$(grep -o 'iops=[0-9.]*' /tmp/pytorch_20.log | cut -d'=' -f2)
 IOPS_80=$(grep -o 'iops=[0-9.]*' /tmp/pytorch_80.log | cut -d'=' -f2)
 echo "Achieved MatMul IOPS:"
-echo "  -> 20% slice (quota: 20000 tokens/sec): ${IOPS_20} matmuls/sec"
-echo "  -> 80% slice (quota: 80000 tokens/sec): ${IOPS_80} matmuls/sec"
+echo "  -> 20% slice (quota: 100000 tokens/sec): ${IOPS_20} matmuls/sec"
+echo "  -> 80% slice (quota: 400000 tokens/sec): ${IOPS_80} matmuls/sec"
+
+if [ -n "${IOPS_20}" ] && [ -n "${IOPS_80}" ]; then
+    RATIO=$(awk -v i20="${IOPS_20}" -v i80="${IOPS_80}" 'BEGIN { if (i80 > 0) printf "%.4f", i20 / i80; else print "N/A" }')
+    echo "  -> Achieved IOPS ratio (20% / 80%): ${RATIO} (target: ~0.25)"
+fi
 
 sleep 0.2
 echo "=========================================================="

@@ -37,7 +37,7 @@ def get_cgroup_id() -> int:
 def main():
     parser = argparse.ArgumentParser(description="PyTorch Real GPU Benchmark for G-Gate")
     parser.add_argument("--duration", type=float, default=10.0, help="Benchmark run time in seconds (default: 10.0)")
-    parser.add_argument("--matrix-size", type=int, default=1024, help="Matrix dimension N for N x N matmul (default: 1024)")
+    parser.add_argument("--matrix-size", type=int, default=256, help="Matrix dimension N for N x N matmul (default: 256)")
     parser.add_argument("--vram-mb", type=int, default=256, help="CUDA VRAM buffer size in MiB (default: 256)")
     parser.add_argument("--free-on-exit", action="store_true", help="Release allocated CUDA memory and empty cache on exit")
     parser.add_argument("--label", type=str, default="tenant", help="Output prefix label (default: 'tenant')")
@@ -59,9 +59,14 @@ def main():
 
     # Allocate input matrices for compute loop
     n = args.matrix_size
-    a = torch.randn((n, n), dtype=torch.float32, device="cuda")
-    b = torch.randn((n, n), dtype=torch.float32, device="cuda")
+    a = torch.ones((n, n), dtype=torch.float32, device="cuda")
+    b = torch.ones((n, n), dtype=torch.float32, device="cuda")
     torch.cuda.synchronize()
+
+    # Warmup iterations to initialize cuBLAS handle and load fatbins
+    for _ in range(2):
+        c = torch.matmul(a, b)
+        torch.cuda.synchronize()
 
     # Timed compute loop
     start = time.monotonic()
