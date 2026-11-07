@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" width="1000" height="520" style="background:#0f172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;">
+  <defs>
+    <linearGradient id="grad-cyan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+    <linearGradient id="grad-amber" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#d97706" />
+      <stop offset="100%" stop-color="#fbbf24" />
+    </linearGradient>
+    <linearGradient id="grad-green" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#34d399" />
+    </linearGradient>
+    <linearGradient id="grad-purple" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+    <linearGradient id="grad-pink" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#db2777" />
+      <stop offset="100%" stop-color="#f472b6" />
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.35" />
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="1000" height="520" rx="12" fill="#0f172a"/>
+
+  <!-- Main Title & Subtitle Header -->
+  <text x="30" y="32" font-size="18" font-weight="700" fill="#f8fafc" letter-spacing="-0.02em">G-Gate Real-Hardware Validation • NVIDIA Tesla T4 (AWS EC2 g4dn.xlarge)</text>
+  <text x="30" y="50" font-size="11" font-weight="500" fill="#94a3b8">PyTorch 2.7.0+cu128 • Linux 6.8.0-1052-aws • eBPF uprobe zero-injection QoS &amp; attribution governor • +2.40 µs launch overhead</text>
+
+  <!-- PANEL 1 (Top-Left): Exp 2B 20/80 Asymmetric QoS -->
+  <g filter="url(#shadow)">
+    <rect x="25" y="66" width="465" height="205" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+    <!-- Panel Header -->
+    <text x="42" y="92" font-size="13" font-weight="700" fill="#38bdf8">Exp 2B: 20/80 Asymmetric QoS &amp; Latency</text>
+    <rect x="365" y="78" width="110" height="19" rx="4" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.3)" stroke-width="1" />
+    <text x="420" y="91" font-size="10" font-weight="700" fill="#34d399" text-anchor="middle">99.57% Precision</text>
+
+    <!-- Subtitle metric -->
+    <text x="42" y="112" font-size="11" fill="#94a3b8">Observed Ratio: <tspan font-weight="700" fill="#f8fafc">0.24893</tspan> (Target: 0.25000) • CV &lt; 0.07%</text>
+
+    <!-- Bar 1: tenant-20 -->
+    <text x="42" y="137" font-size="11" font-weight="600" fill="#e2e8f0">tenant-20 (100k tok/s)</text>
+    <text x="475" y="137" font-size="11" font-weight="700" fill="#fbbf24" text-anchor="end">1,250.81 IOPS (19.93%)</text>
+    <rect x="42" y="143" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="42" y="143" width="86" height="18" rx="4" fill="url(#grad-amber)" />
+    <text x="42" y="174" font-size="10" fill="#94a3b8">p50: <tspan font-weight="700" fill="#fbbf24">952.6 µs</tspan> (rate-limited via micro-pauses)</text>
+
+    <!-- Bar 2: tenant-80 -->
+    <text x="42" y="198" font-size="11" font-weight="600" fill="#e2e8f0">tenant-80 (400k tok/s)</text>
+    <text x="475" y="198" font-size="11" font-weight="700" fill="#38bdf8" text-anchor="end">5,024.81 IOPS (80.07%)</text>
+    <rect x="42" y="204" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="42" y="204" width="347" height="18" rx="4" fill="url(#grad-cyan)" />
+    <text x="42" y="235" font-size="10" fill="#94a3b8">p50: <tspan font-weight="700" fill="#34d399">56.7 µs</tspan> (below 65.03 µs single-tenant baseline)</text>
+
+    <!-- Callout -->
+    <rect x="42" y="245" width="433" height="18" rx="4" fill="rgba(2,132,199,0.12)" />
+    <text x="258" y="258" font-size="9.5" font-weight="600" fill="#7dd3fc" text-anchor="middle">Low-priority tenant absorbs the queueing delay; high-priority p50 unaffected</text>
+  </g>
+
+  <!-- PANEL 2 (Top-Right): Exp 2C 10 : 30 : 60 Multi-Tenant -->
+  <g filter="url(#shadow)">
+    <rect x="510" y="66" width="465" height="205" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+    <text x="527" y="92" font-size="13" font-weight="700" fill="#38bdf8">Exp 2C: 3-Tenant 10 : 30 : 60 Proportional Scaling</text>
+    <rect x="850" y="78" width="110" height="19" rx="4" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.3)" stroke-width="1" />
+    <text x="905" y="91" font-size="10" font-weight="700" fill="#34d399" text-anchor="middle">99.92% Precision</text>
+
+    <text x="527" y="112" font-size="11" fill="#94a3b8">Ratio: <tspan font-weight="700" fill="#f8fafc">1.000 : 3.000 : 5.995</tspan> (Target: 1 : 3 : 6) • Total 6,271 IOPS</text>
+
+    <!-- tenant-10 -->
+    <text x="527" y="137" font-size="11" font-weight="600" fill="#e2e8f0">tenant-10 (Target: 10.0%)</text>
+    <text x="960" y="137" font-size="11" font-weight="700" fill="#818cf8" text-anchor="end">10.005% • 627.5 IOPS</text>
+    <rect x="527" y="143" width="433" height="16" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="527" y="143" width="43" height="16" rx="4" fill="#818cf8" />
+
+    <!-- tenant-30 -->
+    <text x="527" y="177" font-size="11" font-weight="600" fill="#e2e8f0">tenant-30 (Target: 30.0%)</text>
+    <text x="960" y="177" font-size="11" font-weight="700" fill="#c084fc" text-anchor="end">30.016% • 1,882.4 IOPS</text>
+    <rect x="527" y="183" width="433" height="16" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="527" y="183" width="130" height="16" rx="4" fill="url(#grad-purple)" />
+
+    <!-- tenant-60 -->
+    <text x="527" y="217" font-size="11" font-weight="600" fill="#e2e8f0">tenant-60 (Target: 60.0%)</text>
+    <text x="960" y="217" font-size="11" font-weight="700" fill="#f472b6" text-anchor="end">59.980% • 3,761.6 IOPS</text>
+    <rect x="527" y="223" width="433" height="16" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="527" y="223" width="260" height="16" rx="4" fill="url(#grad-pink)" />
+
+    <!-- Callout -->
+    <rect x="527" y="245" width="433" height="18" rx="4" fill="rgba(168,85,247,0.12)" />
+    <text x="743" y="258" font-size="9.5" font-weight="600" fill="#e9d5ff" text-anchor="middle">Per-tenant share CV &lt; 0.022% across 3 trials</text>
+  </g>
+
+  <!-- PANEL 3 (Bottom-Left): Exp 3 CUDA Graph Replay -->
+  <g filter="url(#shadow)">
+    <rect x="25" y="286" width="465" height="205" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+    <text x="42" y="312" font-size="13" font-weight="700" fill="#38bdf8">Exp 3: PyTorch CUDA Graph Replay</text>
+    <rect x="365" y="298" width="110" height="19" rx="4" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.3)" stroke-width="1" />
+    <text x="420" y="311" font-size="10" font-weight="700" fill="#34d399" text-anchor="middle">99.65% Precision</text>
+
+    <text x="42" y="332" font-size="11" fill="#94a3b8">Target: <tspan font-weight="700" fill="#f8fafc">0.25000</tspan> • Observed: <tspan font-weight="700" fill="#34d399">0.24912</tspan> • Probe: uprobe/cuGraphLaunch</text>
+
+    <!-- graph-20 -->
+    <text x="42" y="357" font-size="11" font-weight="600" fill="#e2e8f0">tenant-graph-20 (6,400 tok/s)</text>
+    <text x="475" y="357" font-size="11" font-weight="700" fill="#fb923c" text-anchor="end">196.71 replays/s (19.94%)</text>
+    <rect x="42" y="363" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="42" y="363" width="86" height="18" rx="4" fill="url(#grad-amber)" />
+    <text x="42" y="394" font-size="10" fill="#94a3b8">p50: 4.84 ms • throttled pauses: 5.835 s cumulative</text>
+
+    <!-- graph-80 -->
+    <text x="42" y="418" font-size="11" font-weight="600" fill="#e2e8f0">tenant-graph-80 (25,600 tok/s)</text>
+    <text x="475" y="418" font-size="11" font-weight="700" fill="#34d399" text-anchor="end">789.63 replays/s (80.06%)</text>
+    <rect x="42" y="424" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="42" y="424" width="347" height="18" rx="4" fill="url(#grad-green)" />
+    <text x="42" y="455" font-size="10" fill="#94a3b8">p50: 1.16 ms • throttled pauses: 5.544 s cumulative</text>
+
+    <!-- Callout -->
+    <rect x="42" y="465" width="433" height="18" rx="4" fill="rgba(16,185,129,0.12)" />
+    <text x="258" y="478" font-size="9.5" font-weight="600" fill="#a7f3d0" text-anchor="middle">Each replay charged a flat 32 tokens (stream-captured graphs, single trial)</text>
+  </g>
+
+  <!-- PANEL 4 (Bottom-Right): Exp 4 VRAM Lifecycle -->
+  <g filter="url(#shadow)">
+    <rect x="510" y="286" width="465" height="205" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5" />
+    <text x="527" y="312" font-size="13" font-weight="700" fill="#38bdf8">Exp 4: Exact VRAM Lifecycle &amp; cuMemFree_v2</text>
+    <rect x="850" y="298" width="110" height="19" rx="4" fill="rgba(16,185,129,0.15)" stroke="rgba(16,185,129,0.3)" stroke-width="1" />
+    <text x="905" y="311" font-size="10" font-weight="700" fill="#34d399" text-anchor="middle">0 Byte Drift</text>
+
+    <text x="527" y="332" font-size="11" fill="#94a3b8">Target Quota: <tspan font-weight="700" fill="#f8fafc">128.00 MiB</tspan> • 6 Quota Violations Recorded</text>
+
+    <!-- Bar 1: Peak Allocation -->
+    <text x="527" y="357" font-size="11" font-weight="600" fill="#e2e8f0">Peak Allocation (258 MiB tensor + context)</text>
+    <text x="960" y="357" font-size="11" font-weight="700" fill="#f87171" text-anchor="end">286.13 MiB (300,024,832 B)</text>
+    <rect x="527" y="363" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="527" y="363" width="395" height="18" rx="4" fill="url(#grad-pink)" />
+    <text x="527" y="394" font-size="10" fill="#fca5a5">Over-quota: 158.13 MiB breach detected in kernel plane</text>
+
+    <!-- Bar 2: Post-empty_cache() -->
+    <text x="527" y="418" font-size="11" font-weight="600" fill="#e2e8f0">After torch.cuda.empty_cache() deallocation</text>
+    <text x="960" y="418" font-size="11" font-weight="700" fill="#34d399" text-anchor="end">28.13 MiB (29,492,224 B)</text>
+    <rect x="527" y="424" width="433" height="18" rx="4" fill="rgba(255,255,255,0.06)" />
+    <rect x="527" y="424" width="39" height="18" rx="4" fill="url(#grad-green)" />
+    <text x="527" y="455" font-size="10" fill="#86efac">Net Reclaimed: <tspan font-weight="700" fill="#34d399">258.000000 MiB</tspan> (Exact match, 0.00 B residual)</text>
+
+    <!-- Callout -->
+    <rect x="527" y="465" width="433" height="18" rx="4" fill="rgba(16,185,129,0.12)" />
+    <text x="743" y="478" font-size="9.5" font-weight="600" fill="#a7f3d0" text-anchor="middle">300,024,832 B − 29,492,224 B = 270,532,608 B = 258.00 MiB freed</text>
+  </g>
+
+  <!-- Global Footer -->
+  <text x="500" y="508" font-size="10" fill="#64748b" text-anchor="middle">AWS EC2 g4dn.xlarge • Tesla T4 (UUID: GPU-be911a86) • Driver 580.126.09 • Telemetry raw logs archived in benchmarks/results/latest/</text>
+</svg>

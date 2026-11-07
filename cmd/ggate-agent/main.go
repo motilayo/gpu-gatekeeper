@@ -64,6 +64,10 @@ func (t *wallPauseTracker) Get(cgroupID uint64) uint64 {
 	return t.nsByCgroup[cgroupID]
 }
 
+func (t *wallPauseTracker) Seconds(cgroupID uint64) float64 {
+	return float64(t.Get(cgroupID)) / 1e9
+}
+
 type bpfCollector struct {
 	quotaMap            *ebpf.Map
 	resolver            *k8s.Resolver
@@ -520,6 +524,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/api/v1/tenants", handleTenantsAPI(objs.CgroupQuotaMap, resolver, pauseTracker))
+	mux.HandleFunc("/", handleDashboardUI())
 
 	server := &http.Server{
 		Addr:    *metricsAddr,

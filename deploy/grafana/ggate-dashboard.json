@@ -27,8 +27,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (namespace, pod) (rate(ggate_gpu_launches_total[1m]))",
-          "legendFormat": "{{namespace}}/{{pod}}",
+          "expr": "sum by (namespace, pod, resource_claim) (rate(ggate_gpu_launches_total[1m]))",
+          "legendFormat": "{{namespace}}/{{pod}} ({{resource_claim}})",
           "range": true,
           "refId": "A"
         }
@@ -61,8 +61,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (namespace, pod) (rate(ggate_gpu_throttled_seconds_total[1m]))",
-          "legendFormat": "{{namespace}}/{{pod}}",
+          "expr": "sum by (namespace, pod, resource_claim) (rate(ggate_gpu_throttled_seconds_total[1m]))",
+          "legendFormat": "{{namespace}}/{{pod}} ({{resource_claim}})",
           "range": true,
           "refId": "A"
         }
@@ -95,8 +95,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (namespace, pod) (ggate_vram_allocated_bytes)",
-          "legendFormat": "{{namespace}}/{{pod}} (Allocated)",
+          "expr": "sum by (namespace, pod, resource_claim) (ggate_vram_allocated_bytes)",
+          "legendFormat": "{{namespace}}/{{pod}} ({{resource_claim}}) [Allocated]",
           "range": true,
           "refId": "A"
         },
@@ -106,8 +106,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (namespace, pod) (ggate_vram_quota_bytes)",
-          "legendFormat": "{{namespace}}/{{pod}} (Quota)",
+          "expr": "sum by (namespace, pod, resource_claim) (ggate_vram_quota_bytes)",
+          "legendFormat": "{{namespace}}/{{pod}} ({{resource_claim}}) [Quota]",
           "range": true,
           "refId": "B"
         }
@@ -139,8 +139,8 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "sum by (namespace, pod) (ggate_vram_quota_exceeded_total)",
-          "legendFormat": "{{namespace}}/{{pod}}",
+          "expr": "sum by (namespace, pod, resource_claim) (ggate_vram_quota_exceeded_total)",
+          "legendFormat": "{{namespace}}/{{pod}} ({{resource_claim}})",
           "range": true,
           "refId": "A"
         }

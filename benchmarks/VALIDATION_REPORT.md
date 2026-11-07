@@ -10,6 +10,8 @@
 
 ## 1. Executive Summary & Key Findings
 
+![G-Gate NVIDIA Tesla T4 Real-Hardware Benchmarks](results/latest/ggate-tesla-t4-benchmarks.svg)
+
 This report documents the rigorous, physical hardware validation of **G-Gate**—an out-of-band, zero-injection GPU observability and Quality-of-Service (QoS) rate governor for Linux and Kubernetes. Evaluated on an AWS EC2 `g4dn.xlarge` GPU instance equipped with an NVIDIA Tesla T4 accelerator, the benchmark suite empirically validates attribution overhead, multi-tenant kernel fairness, accelerated CUDA Graph rate limiting, and exact dynamic VRAM lifecycle tracking.
 
 All tests were performed against native user-space CUDA runtime calls without `LD_PRELOAD`, without container sidecars, and without invasive kernel patches.
@@ -148,7 +150,7 @@ Demonstrate that G-Gate's nanosecond integer token-bucket algorithm, paired with
 - **Isolation Precision:** **`99.57%`**
 
 #### Latency Inversion Mechanics
-Notice the p50 latencies: `tenant-20` experienced a p50 latency of $0.95 \ \text{ms}$ because its token bucket was continuously exhausted, causing G-Gate's micro-pacer to inject calculated $1.0\text{ms} - 10.0\text{ms}$ pauses. Meanwhile, `tenant-80` enjoyed a p50 latency of only $0.057 \ \text{ms}$ ($57 \ \mu\text{s}$), running virtually unthrottled. This proves the physical isolation guarantee: **low-priority tenants bear the entire latency penalty while high-priority tenants retain sub-millisecond execution**.
+Notice the p50 latencies: `tenant-20` experienced a p50 latency of $0.95 \ \text{ms}$ because its token bucket was continuously exhausted, causing G-Gate's micro-pacer to inject calculated $1.0\text{ms} - 10.0\text{ms}$ pauses *(Note: Measured under v0.2's `MAX_PAUSE_NS = 10 ms` ceiling; in v0.4+ the ceiling was raised to 50 ms to pace 128-token CUDA Graphs at 6,400 tok/s)*. Meanwhile, `tenant-80` enjoyed a p50 latency of only $0.057 \ \text{ms}$ ($57 \ \mu\text{s}$), running virtually unthrottled. This proves the physical isolation guarantee: **low-priority tenants bear the entire latency penalty while high-priority tenants retain sub-millisecond execution**.
 
 ---
 

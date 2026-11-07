@@ -25,7 +25,7 @@ build-agent: generate
 	$(EXEC) go build -o build/ggate-agent ./cmd/ggate-agent
 
 test-unit: generate
-	$(EXEC) go test -v ./internal/...
+	$(EXEC) go test -v ./internal/... ./cmd/...
 
 test-e2e: all
 	$(EXEC) bash ./scripts/test-e2e.sh

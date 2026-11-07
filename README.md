@@ -6,6 +6,8 @@ G-Gate is an out-of-band, zero-injection GPU observability and Quality-of-Servic
 
 ### Publication-Grade Real-Hardware Validation (NVIDIA Tesla T4 + PyTorch `2.7.0+cu128`)
 
+![G-Gate NVIDIA Tesla T4 Real-Hardware Benchmarks](benchmarks/results/latest/ggate-tesla-t4-benchmarks.svg)
+
 Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.8.0-1052-aws`, PyTorch `2.7.0+cu128`, CUDA `12.8`, driver `580.126.09`). Complete raw CSV telemetry and Prometheus metrics are committed in [`benchmarks/results/latest/`](benchmarks/results/latest/). Full reproduction instructions, statistical variances, and latency distributions are documented in the [**Third-Party Validation & Reproducibility Report**](benchmarks/VALIDATION_REPORT.md).
 
 | Experiment | Scenario & Workload | Target Hypothesis | Observed Real-Hardware Result | Accuracy / Overhead |
@@ -19,7 +21,7 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 
 #### Token-Bucket Physics & Self-Clocking Scheduler Analysis
 
-1. **Deterministic Micro-Slicing (`MAX_PAUSE_NS` Ceiling):** Rather than blocking a process for seconds when encountering large token deficits, G-Gate enforces a micro-pause ceiling (`MAX_PAUSE_NS = 50,000,000 ns` / 50 ms). Any remaining deficit is recorded in `debt_tokens` and paid off in subsequent micro-slices, preventing heartbeat timeouts or healthcheck dropouts in Kubernetes.
+1. **Deterministic Micro-Slicing (`MAX_PAUSE_NS` 50 ms Ceiling):** Rather than blocking a process for seconds when encountering large token deficits, G-Gate enforces a 50 ms micro-pause ceiling (`MAX_PAUSE_NS = 50,000,000 ns`). 50 ms is the smallest cap that still paces a 128-token CUDA Graph at 6,400 tok/s (which requires a 20 ms inter-launch gap). Any remaining deficit is recorded in `debt_tokens` and paid off in subsequent micro-slices, preventing heartbeat timeouts or healthcheck dropouts in Kubernetes.
 2. **Deficit Payoff Math & Future Timestamp Guard:** When a process is paused for `sleep_ns`, the token bucket's `last_update_ns` is advanced to `max(now, last_update_ns) + sleep_ns`. Refills only occur when `now > last_update_ns`, preventing paused threads from accumulating "free" tokens during their penalty sleep.
 3. **True Wall-Clock Latency Accounting:** The userspace Go ringbuffer reader records `pausedAt := time.Now()` upon receiving a `throttle_event` and measures `time.Since(pausedAt)` when dispatching `SIGCONT`, ensuring `ggate_gpu_throttled_seconds_total` reflects physical wall-clock pause duration without under-counting.
 4. **CUDA Graph Replay & Async Memory Lifecycle:** G-Gate intercepts `cuGraphLaunch` (attributing fixed-cost token weight to graph execution without kernel disassembly) and tracks modern stream-ordered VRAM lifecycle via `cuMemAllocAsync` / `cuMemFreeAsync`.
@@ -28,6 +30,8 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 ---
 
 ## Architecture
+
+For detailed sequence diagrams (throttle loop, VRAM pointer tracking, CUDA Graph costing, DRA lifecycle ordering) and known limits, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```
 +-----------------------------------------------------------------------------------------+
@@ -41,7 +45,7 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 | Kernel Space: eBPF Data Plane (bpf/ggate.bpf.c)                                         |
 |   1. Reads cgroup_id = bpf_get_current_cgroup_id()                                      |
 |   2. Computes kernel launch token cost from gridDim & blockDim (or default graph weight)|
-|   3. Updates cgroup_quota_map (BPF_MAP_TYPE_HASH) token bucket with 10ms micro-pause   |
+|   3. Updates cgroup_quota_map (BPF_MAP_TYPE_HASH) token bucket with 50ms micro-pause   |
 |   4. If tokens < cost: emits throttle_event, increments pause ns, sends SIGSTOP         |
 |   5. Tracks live VRAM lifecycle (cuMemAlloc_v2 / cuMemAllocAsync & frees)               |
 |   6. Flags VRAM quota overages against max_vram_bytes                                   |
@@ -70,10 +74,11 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 - **Kubelet DRA Unix Socket Server & ResourceSlice Publisher:** Exposes `/v1/NodePrepareResources` and `/v1/NodeUnprepareResources` RPCs over a local UNIX domain socket for dynamic claim lifecycle injection, and publishes node `ResourceSlice` (`resource.k8s.io/v1`) specifications directly to the cluster API or local runtime.
 - **Kubernetes Pod Label Resolution:** Correlates cgroup v2 inodes with Kubelet HTTPS (`:10250/pods`) using ServiceAccount Bearer token authentication, enriching Prometheus metrics with `namespace`, `pod`, and `container` labels.
 - **Pod Annotation Quotas:** Declare GPU compute and VRAM quotas directly on Pod manifests using `g-gate.io/tokens-per-sec`, `g-gate.io/burst-tokens`, `g-gate.io/max-vram-mb`, and `g-gate.io/vram-policy` annotations with zero agent restarts.
-- **Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 50 ms ceiling (`MAX_PAUSE_NS`) to prevent process starvation or Kubernetes probe timeouts.
+- **50 ms Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 50 ms ceiling (`MAX_PAUSE_NS`) to prevent process starvation or Kubernetes probe timeouts.
 - **True Wall-Clock Throttling Tracking:** Exports `ggate_gpu_throttled_seconds_total` measuring physical pause time added by QoS rate limiting.
 - **Live VRAM Lifecycle Tracking:** Accurately attributes memory allocations on `cuMemAlloc_v2` / `cuMemAllocAsync` and releases on `cuMemFree_v2` / `cuMemFreeAsync` back to 0, flagging quota overages in `ggate_vram_quota_exceeded_total`.
 - **Production Packaging:** Multi-stage `Dockerfile`, Helm chart (`deploy/helm/ggate`), GitHub Actions E2E CI (`.github/workflows/ci.yml`), and pre-built Grafana dashboard (`deploy/grafana/ggate-dashboard.json`).
+- **Built-in Live Web Console & Telemetry API (`GET /` & `GET /api/v1/tenants`):** Zero-dependency, real-time dark-mode web console and JSON telemetry endpoint served directly on `:9090` for instant per-tenant observability without requiring Prometheus or Grafana.
 - **$0 Local Mock Development:** Full multi-architecture development on Apple Silicon macOS via Lima VM without requiring physical NVIDIA GPUs.
 
 ---

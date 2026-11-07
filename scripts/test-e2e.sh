@@ -917,6 +917,19 @@ if [ -z "${POD_METRIC_M13}" ]; then
     exit 1
 fi
 
+# Verify Live Web Console & JSON Telemetry endpoint
+echo "Verifying Live Web Console and JSON telemetry endpoint..."
+if ! curl -s http://localhost:9090/api/v1/tenants | grep -q "vllm-dra-claim-m13"; then
+    echo "FAIL: Expected vllm-dra-claim-m13 in /api/v1/tenants response"
+    curl -s http://localhost:9090/api/v1/tenants || true
+    exit 1
+fi
+if ! curl -s http://localhost:9090/ | grep -q "G-Gate Live GPU QoS"; then
+    echo "FAIL: Expected 'G-Gate Live GPU QoS' in / web dashboard response"
+    exit 1
+fi
+echo "  -> Verified Live Web Console (GET /) and JSON Telemetry (GET /api/v1/tenants)"
+
 # Dynamically unprepare resource over Unix domain socket
 echo "Sending NodeUnprepareResources request over /tmp/ggate_dra.sock..."
 UNPREP_RESP=$(curl -s --unix-socket /tmp/ggate_dra.sock -X POST http://localhost/v1/NodeUnprepareResources \
