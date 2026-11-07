@@ -1,6 +1,6 @@
 # Multi-stage Dockerfile for G-Gate GPU Observability & QoS Governor Agent
 
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /src
 
