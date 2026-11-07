@@ -1,0 +1,58 @@
+# G-Gate Native Kubernetes Dynamic Resource Allocation (DRA - resource.k8s.io/v1) Example
+# Demonstrates GPU device slicing, token-bucket compute rate limits, and VRAM quotas
+# without requiring any pod annotations or sidecar injections.
+---
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.g-gate.io
+spec:
+  selectors: []
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: llama3-gpu-slice
+  namespace: ai-prod
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          deviceClassName: gpu.g-gate.io
+          allocationMode: ExactCount
+          count: 1
+          capacity:
+            consumedCapacity:
+              gpu.g-gate.io/tokens-per-sec: "6400"  # ~200 kernel launches/sec rate limit
+              gpu.g-gate.io/burst-tokens: "64"      # Bucket burst capacity
+              memory: "16Gi"                        # 16 GiB VRAM quota enforcement
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama3-dra-inference
+  namespace: ai-prod
+  labels:
+    app.kubernetes.io/name: llama3-inference
+spec:
+  # Reference the ResourceClaimTemplate; Kubernetes creates and binds a ResourceClaim
+  # per Pod replica automatically. G-Gate intercepts the claim and enforces quotas.
+  resourceClaims:
+    - name: gpu
+      resourceClaimTemplateName: llama3-gpu-slice
+  containers:
+    - name: inference
+      image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+      resources:
+        claims:
+          - name: gpu
+      command:
+        - python
+        - -c
+        - |
+          import torch
+          print(f"CUDA available: {torch.cuda.is_available()}")
+          print(f"Device: {torch.cuda.get_device_name(0)}")
+          # Workload execution under G-Gate DRA quota governor...
+          import time; time.sleep(3600)

@@ -64,6 +64,7 @@ Validated on AWS EC2 `g4dn.xlarge` Spot (`us-east-2`, `Tesla T4 16GB`, Linux `6.
 
 - **Zero-Injection Observability:** Intercepts `cuLaunchKernel`, `cuLaunchKernelEx`, `cuGraphLaunch`, `cuMemAlloc_v2`, `cuMemAllocAsync`, `cuMemFree_v2`, and `cuMemFreeAsync` without modifying container images or injecting `LD_PRELOAD`.
 - **Driver Auto-Discovery (`--libcuda=auto`):** Automatically locates active NVIDIA driver libraries across container runtimes, GPU Operator paths, and host filesystems.
+- **Native Kubernetes DRA Support (`resource.k8s.io/v1`):** Native Dynamic Resource Allocation driver and controller that auto-discovers bound `ResourceClaim` objects, parses consumed capacity shares and VRAM limits, and generates Container Device Interface (CDI 0.6.0) device specifications with zero Pod annotations required.
 - **Kubernetes Pod Label Resolution:** Correlates cgroup v2 inodes with Kubelet HTTPS (`:10250/pods`) using ServiceAccount Bearer token authentication, enriching Prometheus metrics with `namespace`, `pod`, and `container` labels.
 - **Pod Annotation Quotas:** Declare GPU compute and VRAM quotas directly on Pod manifests using `g-gate.io/tokens-per-sec` and `g-gate.io/max-vram-mb` annotations with zero agent restarts.
 - **10 ms Micro-Pausing QoS Governor:** Nanosecond integer token-bucket rate limiter that throttles workloads via `SIGSTOP`/`SIGCONT` micro-pausing with a 10 ms ceiling to prevent process starvation or Kubernetes probe timeouts.
@@ -110,6 +111,7 @@ This automated test suite verifies all milestones:
 4. **Milestone 4:** Runs `workload_sim -free-on-exit` and confirms allocated VRAM is accurately decremented back to 0.
 5. **Milestone 5:** Connects agent to mock Kubelet Pod metadata with `g-gate.io/tokens-per-sec="6400"` and `g-gate.io/max-vram-mb="32"`, verifies automatic quota discovery, and confirms enriched Pod labels, `ggate_gpu_throttled_seconds_total > 0`, and VRAM quota violation tracking.
 6. **Milestone 9 (v0.2):** Validates CUDA Graphs (`cuGraphLaunch`), stream-ordered memory (`cuMemAllocAsync` / `cuMemFreeAsync`), `--libcuda auto` resolution, and micro-sliced latency tracking.
+7. **Milestone 10 (v0.3):** Validates Kubernetes DRA (`resource.k8s.io/v1`) `ResourceClaim` discovery, CDI 0.6.0 specification generation, and zero-annotation quota enforcement.
 
 ### Build Targets
 
@@ -148,6 +150,51 @@ spec:
 
 ---
 
+## Native Kubernetes DRA (`resource.k8s.io/v1`) & CDI Driver
+
+G-Gate natively supports Kubernetes Dynamic Resource Allocation (DRA) without requiring any Pod annotations. Bound `ResourceClaim` objects define GPU token-bucket rates and VRAM quotas via `consumedCapacity` or `opaque.parameters`. G-Gate automatically translates bound claims into eBPF quotas and generates Container Device Interface (CDI 0.6.0) device specifications:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: llama3-gpu-slice
+  namespace: ai-prod
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          deviceClassName: gpu.g-gate.io
+          allocationMode: ExactCount
+          count: 1
+          capacity:
+            consumedCapacity:
+              gpu.g-gate.io/tokens-per-sec: "6400"  # ~200 kernel launches/sec
+              gpu.g-gate.io/burst-tokens: "64"      # Burst token capacity
+              memory: "16Gi"                        # 16 GiB VRAM limit
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: llama3-dra-inference
+  namespace: ai-prod
+spec:
+  resourceClaims:
+    - name: gpu
+      resourceClaimTemplateName: llama3-gpu-slice
+  containers:
+    - name: inference
+      image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+      resources:
+        claims:
+          - name: gpu
+```
+
+See [deploy/kubernetes/dra-example.yaml](deploy/kubernetes/dra-example.yaml) for full manifests including `DeviceClass`, `ResourceClaimTemplate`, and `Pod`.
+
+---
+
 ## CLI Reference
 
 ### `ggate-agent`
@@ -164,6 +211,9 @@ spec:
 | `--kubelet-pods-url` | `""` | HTTP/HTTPS URL returning Kubelet `/pods` JSON |
 | `--kubelet-pods-file` | `""` | Path to local JSON file with Kubelet `/pods` format |
 | `--kubelet-token-file` | `"/var/run/secrets/kubernetes.io/serviceaccount/token"` | Path to ServiceAccount bearer token for Kubelet HTTPS `:10250/pods` |
+| `--dra-claims-url` | `""` | HTTPS URL returning Kubernetes `resource.k8s.io/v1` `ResourceClaimList` JSON |
+| `--dra-claims-file` | `""` | Path to local JSON file with Kubernetes `ResourceClaimList` format |
+| `--cdi-dir` | `"/var/run/cdi"` | Path to directory for Container Device Interface (CDI 0.6.0) JSON specs |
 
 The `<target>` for `--quota` can be:
 - A numeric cgroup inode: `--quota 12345:6400:64`

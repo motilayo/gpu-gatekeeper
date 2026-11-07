@@ -26,6 +26,7 @@ import (
 
 	"github.com/motilayo/gpu-gatekeeper/internal/bpf"
 	"github.com/motilayo/gpu-gatekeeper/internal/cgroup"
+	"github.com/motilayo/gpu-gatekeeper/internal/dra"
 	"github.com/motilayo/gpu-gatekeeper/internal/k8s"
 )
 
@@ -229,6 +230,9 @@ func main() {
 	kubeletPodsURL := flag.String("kubelet-pods-url", "", "HTTP URL returning Kubelet /pods JSON")
 	kubeletPodsFile := flag.String("kubelet-pods-file", "", "Path to local JSON file with Kubelet /pods format")
 	kubeletTokenFile := flag.String("kubelet-token-file", "/var/run/secrets/kubernetes.io/serviceaccount/token", "Path to ServiceAccount bearer token for Kubelet HTTPS :10250/pods")
+	draClaimsURL := flag.String("dra-claims-url", "", "HTTPS URL returning Kubernetes resource.k8s.io/v1 ResourceClaimList JSON")
+	draClaimsFile := flag.String("dra-claims-file", "", "Path to local JSON file with Kubernetes ResourceClaimList format")
+	cdiDir := flag.String("cdi-dir", "/var/run/cdi", "Path to directory for Container Device Interface (CDI) JSON specs")
 	flag.Parse()
 
 	if err := rlimit.RemoveMemlock(); err != nil {
@@ -293,6 +297,12 @@ func main() {
 
 	// Start Kubernetes workload metadata resolver & annotation quota controller
 	resolver := k8s.NewResolver(objs.CgroupQuotaMap, *kubeletPodsURL, *kubeletPodsFile, *kubeletTokenFile)
+	resolver.SetDRAClaimsSource(*draClaimsURL, *draClaimsFile)
+	if *cdiDir != "" {
+		draDriver := dra.NewDriver(*cdiDir)
+		resolver.SetDRADriver(draDriver)
+		log.Printf("Initialized DRA driver with CDI spec directory: %s", *cdiDir)
+	}
 	resolverCtx, resolverCancel := context.WithCancel(context.Background())
 	defer resolverCancel()
 	go resolver.Start(resolverCtx, 100*time.Millisecond)

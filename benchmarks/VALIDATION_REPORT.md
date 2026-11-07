@@ -106,7 +106,7 @@ Demonstrate that G-Gate's nanosecond integer token-bucket algorithm, paired with
 
 #### Trial Results ([`qos_matrix_trials.csv`](results/latest/qos_matrix_trials.csv))
 
-| Trial | Tenant | Quota (tok/s) | Achieved IOPS | p50 Latency (ms) | p95 Latency (ms) | Paused Time (s) | Throttles | Launches |
+| Trial | Tenant | Quota (tok/s) | Achieved IOPS | p50 Latency (ms) | p95 Latency (ms) | Paused Time (s) (Cumulative) | Throttles (Cumulative) | Launches (Cumulative) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1** | `tenant-50a` | 200,000 | 2,511.72 | 0.2491 | 1.3015 | 3.328 s | 3,853 | 30,152 |
 | **1** | `tenant-50b` | 200,000 | 2,511.49 | 0.2488 | 1.3026 | 3.304 s | 3,832 | 30,144 |
@@ -130,7 +130,7 @@ Demonstrate that G-Gate's nanosecond integer token-bucket algorithm, paired with
 
 #### Trial Results ([`qos_matrix_trials.csv`](results/latest/qos_matrix_trials.csv))
 
-| Trial | Tenant | Share Target | Quota (tok/s) | Achieved IOPS | p50 (ms) | p99 (ms) | Paused Time (s) | Throttles |
+| Trial | Tenant | Share Target | Quota (tok/s) | Achieved IOPS | p50 (ms) | p99 (ms) | Paused Time (s) (Cumulative) | Throttles (Cumulative) |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1** | `tenant-20` | 20.0% | 100,000 | 1,250.85 | 0.9526 | 1.7774 | 4.612 s | 4,015 |
 | **1** | `tenant-80` | 80.0% | 400,000 | 5,028.96 | 0.0567 | 1.0239 | 2.407 s | 3,933 |
@@ -224,7 +224,7 @@ Verify that G-Gate's dual probes (`uretprobe/cuMemAlloc_v2` and `uprobe/cuMemFre
 
 ### Workload Lifecycle Timeline
 1. **Pod Enrollment:** A pod named `vllm-vram-audit` was enrolled via Kubernetes annotations with a strict VRAM quota of **`128 MiB`** (`134,217,728 bytes`).
-2. **PyTorch Tensor Allocation:** The workload allocated a **`256 MiB`** float32 tensor (`268,435,456 bytes`) plus two $1024 \times 1024$ matrix input buffers ($2 \times 1,048,576 \ \text{bytes} = 2,097,152 \ \text{bytes}$).
+2. **PyTorch Tensor Allocation:** The workload allocated a **`256 MiB`** float32 tensor (`268,435,456 bytes`) plus two $512 \times 512$ `float32` matrix input buffers ($2 \times 1,048,576 \ \text{bytes} = 2,097,152 \ \text{bytes}$).
 3. **Driver Context Attribution:** Total active memory peaked at **`300,024,832 bytes`** ($286.12 \ \text{MiB}$), accounting for the $258.00 \ \text{MiB}$ workload buffers plus the internal CUDA driver context.
 4. **Quota Violation Enforcement:** Because $300,024,832 > 134,217,728$, G-Gate recorded **`6` consecutive quota violation events** in Prometheus (`ggate_vram_quota_exceeded_total`).
 5. **Garbage Collection & Cache Purge:** The workload deleted the buffer and invoked PyTorch's native cache release:

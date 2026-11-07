@@ -18,6 +18,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/motilayo/gpu-gatekeeper/internal/bpf"
+	"github.com/motilayo/gpu-gatekeeper/internal/dra"
 )
 
 // WorkloadMeta holds Kubernetes workload identity for a cgroup.
@@ -33,6 +34,7 @@ type podList struct {
 
 type podItem struct {
 	Metadata podMetadata `json:"metadata"`
+	Spec     podSpec     `json:"spec"`
 	Status   podStatus   `json:"status"`
 }
 
@@ -43,13 +45,82 @@ type podMetadata struct {
 	Annotations map[string]string `json:"annotations"`
 }
 
+type podSpec struct {
+	ResourceClaims []podResourceClaim `json:"resourceClaims"`
+}
+
+type podResourceClaim struct {
+	Name                      string `json:"name"`
+	ResourceClaimName         string `json:"resourceClaimName"`
+	ResourceClaimTemplateName string `json:"resourceClaimTemplateName"`
+}
+
 type podStatus struct {
-	ContainerStatuses []containerStatus `json:"containerStatuses"`
+	ContainerStatuses     []containerStatus       `json:"containerStatuses"`
+	ResourceClaimStatuses []podResourceClaimStatus `json:"resourceClaimStatuses"`
+}
+
+type podResourceClaimStatus struct {
+	Name              string `json:"name"`
+	ResourceClaimName string `json:"resourceClaimName"`
 }
 
 type containerStatus struct {
 	Name        string `json:"name"`
 	ContainerID string `json:"containerID"`
+}
+
+// Kubernetes DRA resource.k8s.io/v1 ResourceClaim structures
+type resourceClaimList struct {
+	Items []resourceClaimItem `json:"items"`
+}
+
+type resourceClaimItem struct {
+	Metadata podMetadata         `json:"metadata"`
+	Spec     resourceClaimSpec   `json:"spec"`
+	Status   resourceClaimStatus `json:"status"`
+}
+
+type resourceClaimSpec struct {
+	Devices deviceClaim `json:"devices"`
+}
+
+type deviceClaim struct {
+	Config []deviceClaimConfiguration `json:"config"`
+}
+
+type deviceClaimConfiguration struct {
+	Opaque *opaqueDeviceConfiguration `json:"opaque"`
+}
+
+type opaqueDeviceConfiguration struct {
+	Driver     string                 `json:"driver"`
+	Parameters map[string]interface{} `json:"parameters"`
+}
+
+type resourceClaimStatus struct {
+	Allocation *allocationResult `json:"allocation"`
+}
+
+type allocationResult struct {
+	Devices deviceAllocationResult `json:"devices"`
+}
+
+type deviceAllocationResult struct {
+	Results []deviceRequestAllocationResult `json:"results"`
+	Config  []deviceAllocationConfiguration `json:"config"`
+}
+
+type deviceRequestAllocationResult struct {
+	Request          string            `json:"request"`
+	Driver           string            `json:"driver"`
+	Pool             string            `json:"pool"`
+	Device           string            `json:"device"`
+	ConsumedCapacity map[string]string `json:"consumedCapacity"`
+}
+
+type deviceAllocationConfiguration struct {
+	Opaque *opaqueDeviceConfiguration `json:"opaque"`
 }
 
 type enrolledPolicy struct {
@@ -58,15 +129,81 @@ type enrolledPolicy struct {
 	maxVramBytes uint64
 }
 
+// parseK8sQuantity parses standard Kubernetes quantity strings (Ki, Mi, Gi, Ti, k, M, G, T, or plain integers).
+func parseK8sQuantity(val string) (uint64, bool) {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0, false
+	}
+	// Binary suffixes
+	if strings.HasSuffix(val, "Ki") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "Ki"), 10, 64)
+		return base * 1024, err == nil
+	}
+	if strings.HasSuffix(val, "Mi") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "Mi"), 10, 64)
+		return base * 1024 * 1024, err == nil
+	}
+	if strings.HasSuffix(val, "Gi") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "Gi"), 10, 64)
+		return base * 1024 * 1024 * 1024, err == nil
+	}
+	if strings.HasSuffix(val, "Ti") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "Ti"), 10, 64)
+		return base * 1024 * 1024 * 1024 * 1024, err == nil
+	}
+	// Decimal suffixes
+	if strings.HasSuffix(val, "k") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "k"), 10, 64)
+		return base * 1000, err == nil
+	}
+	if strings.HasSuffix(val, "M") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "M"), 10, 64)
+		return base * 1000000, err == nil
+	}
+	if strings.HasSuffix(val, "G") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "G"), 10, 64)
+		return base * 1000000000, err == nil
+	}
+	if strings.HasSuffix(val, "T") {
+		base, err := strconv.ParseUint(strings.TrimSuffix(val, "T"), 10, 64)
+		return base * 1000000000000, err == nil
+	}
+	// Plain integer
+	base, err := strconv.ParseUint(val, 10, 64)
+	return base, err == nil
+}
+
+func parseUintFromInterface(v interface{}) (uint64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return uint64(val), true
+	case int:
+		return uint64(val), true
+	case int64:
+		return uint64(val), true
+	case uint64:
+		return val, true
+	case string:
+		u, err := strconv.ParseUint(val, 10, 64)
+		return u, err == nil
+	default:
+		return 0, false
+	}
+}
+
 // Resolver periodically discovers cgroup v2 paths, correlates them with Kubernetes
-// Pod metadata from Kubelet, and applies Pod annotation quotas automatically.
+// Pod metadata from Kubelet and DRA ResourceClaims, and applies quotas automatically.
 type Resolver struct {
 	quotaMap   *ebpf.Map
 	podsURL    string
 	podsFile   string
+	claimsURL  string
+	claimsFile string
 	tokenFile  string
 	cgroupRoot string
 	httpClient *http.Client
+	draDriver  *dra.Driver
 
 	mu          sync.RWMutex
 	inodeToPath map[uint64]string
@@ -92,6 +229,17 @@ func NewResolver(quotaMap *ebpf.Map, podsURL, podsFile, tokenFile string) *Resol
 		inodeToMeta: make(map[uint64]WorkloadMeta),
 		enrolled:    make(map[uint64]enrolledPolicy),
 	}
+}
+
+// SetDRAClaimsSource configures optional Kubernetes DRA resource.k8s.io ResourceClaim discovery.
+func (r *Resolver) SetDRAClaimsSource(claimsURL, claimsFile string) {
+	r.claimsURL = claimsURL
+	r.claimsFile = claimsFile
+}
+
+// SetDRADriver registers the DRA driver for automated CDI spec generation upon claim discovery.
+func (r *Resolver) SetDRADriver(d *dra.Driver) {
+	r.draDriver = d
 }
 
 func (r *Resolver) fetchPods() ([]podItem, error) {
@@ -139,6 +287,59 @@ func (r *Resolver) fetchPods() ([]podItem, error) {
 	return pl.Items, nil
 }
 
+func (r *Resolver) fetchResourceClaims() (map[string]resourceClaimItem, error) {
+	var body []byte
+	if r.claimsFile != "" {
+		data, err := os.ReadFile(r.claimsFile)
+		if err != nil {
+			return nil, err
+		}
+		body = data
+	} else if r.claimsURL != "" {
+		req, err := http.NewRequest("GET", r.claimsURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		if r.tokenFile != "" {
+			if tokenBytes, err := os.ReadFile(r.tokenFile); err == nil && len(tokenBytes) > 0 {
+				token := strings.TrimSpace(string(tokenBytes))
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+			}
+		}
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("DRA claims server returned HTTP %d", resp.StatusCode)
+		}
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		body = data
+	} else {
+		return nil, nil
+	}
+
+	var cl resourceClaimList
+	if err := json.Unmarshal(body, &cl); err != nil {
+		return nil, err
+	}
+	m := make(map[string]resourceClaimItem, len(cl.Items))
+	for _, item := range cl.Items {
+		key := item.Metadata.Namespace + "/" + item.Metadata.Name
+		m[key] = item
+		if item.Metadata.Namespace == "" || m[item.Metadata.Name].Metadata.Name == "" {
+			m[item.Metadata.Name] = item
+		}
+	}
+	return m, nil
+}
+
 // SyncOnce scans /sys/fs/cgroup, resolves pod metadata, and enrolls annotated quotas.
 func (r *Resolver) SyncOnce() {
 	newInodeToPath := make(map[uint64]string)
@@ -162,6 +363,11 @@ func (r *Resolver) SyncOnce() {
 	pods, err := r.fetchPods()
 	if err != nil && (r.podsFile != "" || r.podsURL != "") {
 		log.Printf("k8s resolver: failed to fetch pods: %v", err)
+	}
+
+	claims, err := r.fetchResourceClaims()
+	if err != nil && (r.claimsFile != "" || r.claimsURL != "") {
+		log.Printf("k8s resolver: failed to fetch DRA resource claims: %v", err)
 	}
 
 	newInodeToMeta := make(map[uint64]WorkloadMeta)
@@ -200,28 +406,178 @@ func (r *Resolver) SyncOnce() {
 					Container: containerName,
 				}
 
-				// Check Pod annotations for compute token-bucket and VRAM quotas
-				rateStr, hasRate := pod.Metadata.Annotations["g-gate.io/tokens-per-sec"]
-				vramStr, hasVram := pod.Metadata.Annotations["g-gate.io/max-vram-mb"]
-
 				var refillRate uint64
 				var maxBurst uint64
-				if hasRate {
-					if rRate, err := strconv.ParseUint(rateStr, 10, 64); err == nil && rRate > 0 {
-						refillRate = rRate
-						maxBurst = rRate
-						if burstStr, ok := pod.Metadata.Annotations["g-gate.io/burst-tokens"]; ok {
-							if burst, err := strconv.ParseUint(burstStr, 10, 64); err == nil && burst > 0 {
-								maxBurst = burst
+				var maxVramBytes uint64
+
+				// 1. Check if the Pod has any bound Kubernetes DRA ResourceClaim
+				var boundClaim *resourceClaimItem
+				for _, rcs := range pod.Status.ResourceClaimStatuses {
+					if rcs.ResourceClaimName != "" {
+						if c, ok := claims[pod.Metadata.Namespace+"/"+rcs.ResourceClaimName]; ok {
+							boundClaim = &c
+							break
+						} else if c, ok := claims[rcs.ResourceClaimName]; ok {
+							boundClaim = &c
+							break
+						}
+					}
+				}
+				if boundClaim == nil {
+					for _, rc := range pod.Spec.ResourceClaims {
+						if rc.ResourceClaimName != "" {
+							if c, ok := claims[pod.Metadata.Namespace+"/"+rc.ResourceClaimName]; ok {
+								boundClaim = &c
+								break
+							} else if c, ok := claims[rc.ResourceClaimName]; ok {
+								boundClaim = &c
+								break
 							}
 						}
 					}
 				}
 
-				var maxVramBytes uint64
-				if hasVram {
-					if mb, err := strconv.ParseUint(vramStr, 10, 64); err == nil && mb > 0 {
-						maxVramBytes = mb * 1024 * 1024
+				if boundClaim != nil {
+					// Extract from claim annotations
+					if boundClaim.Metadata.Annotations != nil {
+						if rStr, ok := boundClaim.Metadata.Annotations["g-gate.io/tokens-per-sec"]; ok {
+							if r, err := strconv.ParseUint(rStr, 10, 64); err == nil && r > 0 {
+								refillRate = r
+							}
+						}
+						if bStr, ok := boundClaim.Metadata.Annotations["g-gate.io/burst-tokens"]; ok {
+							if b, err := strconv.ParseUint(bStr, 10, 64); err == nil && b > 0 {
+								maxBurst = b
+							}
+						}
+						if vStr, ok := boundClaim.Metadata.Annotations["g-gate.io/max-vram-mb"]; ok {
+							if mb, err := strconv.ParseUint(vStr, 10, 64); err == nil && mb > 0 {
+								maxVramBytes = mb * 1024 * 1024
+							}
+						}
+					}
+
+					// Extract from spec.devices.config[].opaque.parameters
+					for _, cfg := range boundClaim.Spec.Devices.Config {
+						if cfg.Opaque != nil && cfg.Opaque.Parameters != nil {
+							if v, ok := cfg.Opaque.Parameters["tokensPerSec"]; ok {
+								if u, ok := parseUintFromInterface(v); ok && u > 0 {
+									refillRate = u
+								}
+							}
+							if v, ok := cfg.Opaque.Parameters["burstTokens"]; ok {
+								if u, ok := parseUintFromInterface(v); ok && u > 0 {
+									maxBurst = u
+								}
+							}
+							if v, ok := cfg.Opaque.Parameters["maxVramMB"]; ok {
+								if u, ok := parseUintFromInterface(v); ok && u > 0 {
+									maxVramBytes = u * 1024 * 1024
+								}
+							}
+						}
+					}
+
+					// Extract from status.allocation
+					if boundClaim.Status.Allocation != nil {
+						// status.allocation.devices.config[].opaque.parameters
+						for _, cfg := range boundClaim.Status.Allocation.Devices.Config {
+							if cfg.Opaque != nil && cfg.Opaque.Parameters != nil {
+								if v, ok := cfg.Opaque.Parameters["tokensPerSec"]; ok {
+									if u, ok := parseUintFromInterface(v); ok && u > 0 {
+										refillRate = u
+									}
+								}
+								if v, ok := cfg.Opaque.Parameters["burstTokens"]; ok {
+									if u, ok := parseUintFromInterface(v); ok && u > 0 {
+										maxBurst = u
+									}
+								}
+								if v, ok := cfg.Opaque.Parameters["maxVramMB"]; ok {
+									if u, ok := parseUintFromInterface(v); ok && u > 0 {
+										maxVramBytes = u * 1024 * 1024
+									}
+								}
+							}
+						}
+
+						// status.allocation.devices.results[].consumedCapacity
+						for _, res := range boundClaim.Status.Allocation.Devices.Results {
+							if res.ConsumedCapacity != nil {
+								// tokens-per-sec or gpu.g-gate.io/tokens-per-sec
+								if tStr, ok := res.ConsumedCapacity["gpu.g-gate.io/tokens-per-sec"]; ok {
+									if tRate, err := strconv.ParseUint(tStr, 10, 64); err == nil && tRate > 0 {
+										refillRate = tRate
+									}
+								} else if tStr, ok := res.ConsumedCapacity["tokens-per-sec"]; ok {
+									if tRate, err := strconv.ParseUint(tStr, 10, 64); err == nil && tRate > 0 {
+										refillRate = tRate
+									}
+								}
+
+								// shares or gpu.g-gate.io/shares (if refillRate == 0, shares * 320)
+								if refillRate == 0 {
+									if sStr, ok := res.ConsumedCapacity["gpu.g-gate.io/shares"]; ok {
+										if shares, err := strconv.ParseUint(sStr, 10, 64); err == nil && shares > 0 {
+											refillRate = shares * 320
+										}
+									} else if sStr, ok := res.ConsumedCapacity["shares"]; ok {
+										if shares, err := strconv.ParseUint(sStr, 10, 64); err == nil && shares > 0 {
+											refillRate = shares * 320
+										}
+									}
+								}
+
+								// burst-tokens or gpu.g-gate.io/burst-tokens
+								if bStr, ok := res.ConsumedCapacity["gpu.g-gate.io/burst-tokens"]; ok {
+									if burst, err := strconv.ParseUint(bStr, 10, 64); err == nil && burst > 0 {
+										maxBurst = burst
+									}
+								} else if bStr, ok := res.ConsumedCapacity["burst-tokens"]; ok {
+									if burst, err := strconv.ParseUint(bStr, 10, 64); err == nil && burst > 0 {
+										maxBurst = burst
+									}
+								}
+
+								// memory or max-vram or gpu.g-gate.io/max-vram
+								for _, memKey := range []string{"gpu.g-gate.io/max-vram", "max-vram", "memory"} {
+									if memStr, ok := res.ConsumedCapacity[memKey]; ok {
+										if bytes, ok := parseK8sQuantity(memStr); ok && bytes > 0 {
+											maxVramBytes = bytes
+											break
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// 2. Check Pod annotations (allows override or fallback when no ResourceClaim is bound)
+				if pod.Metadata.Annotations != nil {
+					if rateStr, ok := pod.Metadata.Annotations["g-gate.io/tokens-per-sec"]; ok {
+						if rRate, err := strconv.ParseUint(rateStr, 10, 64); err == nil && rRate > 0 {
+							refillRate = rRate
+						}
+					}
+					if burstStr, ok := pod.Metadata.Annotations["g-gate.io/burst-tokens"]; ok {
+						if burst, err := strconv.ParseUint(burstStr, 10, 64); err == nil && burst > 0 {
+							maxBurst = burst
+						}
+					}
+					if vramStr, ok := pod.Metadata.Annotations["g-gate.io/max-vram-mb"]; ok {
+						if mb, err := strconv.ParseUint(vramStr, 10, 64); err == nil && mb > 0 {
+							maxVramBytes = mb * 1024 * 1024
+						}
+					}
+				}
+
+				// Default maxBurst fallback: if maxBurst == 0 && refillRate > 0
+				if maxBurst == 0 && refillRate > 0 {
+					if refillRate >= 100 {
+						maxBurst = refillRate / 100
+					} else {
+						maxBurst = refillRate
 					}
 				}
 
@@ -254,10 +610,32 @@ func (r *Resolver) SyncOnce() {
 							r.enrolled[inode] = newPol
 						} else if err := r.quotaMap.Put(&inode, &existingState); err == nil {
 							r.enrolled[inode] = newPol
-							log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d",
-								path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+							if boundClaim != nil {
+								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from DRA ResourceClaim %s (pod %s/%s): refill_rate=%d, burst=%d, max_vram_bytes=%d",
+									path, inode, boundClaim.Metadata.Name, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+							} else {
+								log.Printf("k8s auto-enrolled cgroup %s (inode=%d) from pod %s/%s annotation: refill_rate=%d, burst=%d, max_vram_bytes=%d",
+									path, inode, pod.Metadata.Namespace, pod.Metadata.Name, refillRate, maxBurst, maxVramBytes)
+							}
 						} else {
 							log.Printf("k8s failed to enroll cgroup %s (inode=%d): %v", path, inode, err)
+						}
+
+						// Automatically prepare CDI spec if DRA driver is configured
+						if r.draDriver != nil && boundClaim != nil {
+							claimUID := boundClaim.Metadata.UID
+							if claimUID == "" {
+								claimUID = boundClaim.Metadata.Name
+							}
+							_, _ = r.draDriver.NodePrepareResource(dra.PreparedClaim{
+								ClaimUID:     claimUID,
+								ClaimName:    boundClaim.Metadata.Name,
+								Namespace:    boundClaim.Metadata.Namespace,
+								DeviceID:     "gpu-0",
+								TokensPerSec: refillRate,
+								BurstTokens:  maxBurst,
+								MaxVramBytes: maxVramBytes,
+							})
 						}
 					}
 					r.mu.Unlock()

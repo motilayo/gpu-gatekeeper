@@ -18,6 +18,7 @@ CGROUP_M2="/sys/fs/cgroup/ggate-e2e-m2"
 CGROUP_M4="/sys/fs/cgroup/ggate-e2e-m4"
 CGROUP_M5="/sys/fs/cgroup/kubepods-pod11111111_2222_3333_4444_555555555555-abcdef123456"
 CGROUP_M9="/sys/fs/cgroup/ggate-e2e-m9"
+CGROUP_DRA="/sys/fs/cgroup/kubepods-poddra111111_2222_3333_4444_555555555555-abcdef987654"
 
 cleanup() {
     echo "=== Running cleanup ==="
@@ -34,7 +35,8 @@ cleanup() {
     rmdir "${CGROUP_M4}" 2>/dev/null || true
     rmdir "${CGROUP_M5}" 2>/dev/null || true
     rmdir "${CGROUP_M9}" 2>/dev/null || true
-    rm -f /tmp/ggate_agent_*.log /tmp/sim_*.log /tmp/mock_kubelet_pods.json
+    rmdir "${CGROUP_DRA}" 2>/dev/null || true
+    rm -f /tmp/ggate_agent_*.log /tmp/sim_*.log /tmp/mock_kubelet_pods.json /tmp/mock_dra_*.json
 }
 trap cleanup EXIT
 
@@ -495,5 +497,167 @@ AGENT_PID=""
 rmdir "${CGROUP_M9}" 2>/dev/null || true
 
 echo "=========================================================="
-echo "ALL MILESTONES (1, 2, 3, 4, 5, 9) VERIFIED SUCCESSFULLY!"
+echo "Milestone 10 (v0.3): Native Kubernetes DRA (resource.k8s.io/v1) ResourceClaim Enforcement"
+echo "=========================================================="
+rmdir "${CGROUP_DRA}" 2>/dev/null || true
+
+cat << 'EOF' > /tmp/mock_dra_pods.json
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "vllm-dra-pod",
+        "namespace": "ai-prod",
+        "uid": "dra111111-2222-3333-4444-555555555555",
+        "annotations": {}
+      },
+      "status": {
+        "containerStatuses": [
+          {
+            "name": "vllm",
+            "containerID": "containerd://abcdef987654"
+          }
+        ],
+        "resourceClaimStatuses": [
+          {
+            "name": "gpu",
+            "resourceClaimName": "vllm-dra-claim-01"
+          }
+        ]
+      }
+    }
+  ]
+}
+EOF
+
+cat << 'EOF' > /tmp/mock_dra_claims.json
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "vllm-dra-claim-01",
+        "namespace": "ai-prod",
+        "uid": "dra-claim-uid-01"
+      },
+      "status": {
+        "allocation": {
+          "devices": {
+            "results": [
+              {
+                "request": "gpu",
+                "driver": "gpu.g-gate.io",
+                "consumedCapacity": {
+                  "gpu.g-gate.io/tokens-per-sec": "6400",
+                  "gpu.g-gate.io/burst-tokens": "64",
+                  "memory": "32Mi"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
+EOF
+
+echo "Starting ggate-agent with DRA claims file, CDI dir, and zero Pod annotations..."
+rm -rf /tmp/ggate_cdi_test
+./build/ggate-agent \
+    --libcuda ./build/libcuda.so \
+    --metrics-addr :9090 \
+    --kubelet-pods-file /tmp/mock_dra_pods.json \
+    --dra-claims-file /tmp/mock_dra_claims.json \
+    --cdi-dir /tmp/ggate_cdi_test \
+    > /tmp/ggate_agent_dra.log 2>&1 &
+AGENT_PID=$!
+
+echo "Waiting for ggate-agent to start..."
+READY=0
+for i in {1..50}; do
+    if curl -s http://localhost:9090/metrics >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "${READY}" -ne 1 ]; then
+    echo "FAIL: ggate-agent failed to start for DRA milestone. Logs:"
+    cat /tmp/ggate_agent_dra.log
+    exit 1
+fi
+
+echo "Creating Kubernetes Pod container cgroup ${CGROUP_DRA}..."
+mkdir -p "${CGROUP_DRA}"
+
+# Allow resolver to scan cgroup and auto-enroll quota from DRA ResourceClaim
+sleep 0.3
+
+echo "Running workload_sim in DRA Pod cgroup (duration=3s, vram=64MiB against 32MiB claim limit)..."
+(echo $BASHPID > "${CGROUP_DRA}/cgroup.procs" && ./build/workload_sim -n 0 -duration 3) > /tmp/sim_dra.log 2>&1
+
+cat /tmp/sim_dra.log
+IOPS_DRA=$(grep -o 'iops=[0-9.]*' /tmp/sim_dra.log | cut -d'=' -f2)
+CGROUP_ID_DRA=$(grep -o 'cgroup_id=[0-9]*' /tmp/sim_dra.log | cut -d'=' -f2)
+
+echo "Achieved DRA Pod IOPS: ${IOPS_DRA} (target: 200.0 from DRA tokens-per-sec=6400, expected [185.0, 215.0])"
+
+awk -v iops="${IOPS_DRA}" 'BEGIN {
+    if (iops >= 185.0 && iops <= 215.0) {
+        printf("  -> DRA Pod IOPS %.2f is within bounds [185.0, 215.0]\n", iops);
+        exit 0;
+    } else {
+        printf("FAIL: DRA Pod IOPS %.2f is out of bounds [185.0, 215.0]\n", iops);
+        exit 1;
+    }
+}'
+
+sleep 0.2
+METRICS=$(curl -s http://localhost:9090/metrics)
+echo "Scraped DRA Pod metrics:"
+echo "${METRICS}" | grep "vllm-dra-pod" || true
+
+POD_METRIC=$(echo "${METRICS}" | grep 'namespace="ai-prod"' | grep 'pod="vllm-dra-pod"' | grep 'container="vllm"' || true)
+if [ -z "${POD_METRIC}" ]; then
+    echo "FAIL: Missing expected Kubernetes labels namespace=ai-prod, pod=vllm-dra-pod, container=vllm"
+    exit 1
+fi
+
+VRAM_QUOTA_DRA=$(echo "${METRICS}" | grep "^ggate_vram_quota_bytes{cgroup_id=\"${CGROUP_ID_DRA}\".*}" | awk '{print $2}')
+VRAM_EXCEEDED_DRA=$(echo "${METRICS}" | grep "^ggate_vram_quota_exceeded_total{cgroup_id=\"${CGROUP_ID_DRA}\".*}" | awk '{print $2}')
+echo "DRA Pod VRAM Quota: ${VRAM_QUOTA_DRA:-0} (expected 33554432 for 32Mi claim)"
+echo "DRA Pod VRAM Quota Exceeded count: ${VRAM_EXCEEDED_DRA:-0} (expected 1 for 64 MiB alloc)"
+
+if ! awk -v q="${VRAM_QUOTA_DRA:-0}" 'BEGIN { exit !(q == 33554432) }'; then
+    echo "FAIL: Expected ggate_vram_quota_bytes == 33554432, got '${VRAM_QUOTA_DRA}'"
+    exit 1
+fi
+
+if ! awk -v e="${VRAM_EXCEEDED_DRA:-0}" 'BEGIN { exit !(e == 1) }'; then
+    echo "FAIL: Expected ggate_vram_quota_exceeded_total == 1, got '${VRAM_EXCEEDED_DRA}'"
+    exit 1
+fi
+
+if [ ! -f "/tmp/ggate_cdi_test/gpu.g-gate.io.json" ]; then
+    echo "FAIL: Expected CDI 0.6.0 specification file at /tmp/ggate_cdi_test/gpu.g-gate.io.json"
+    exit 1
+fi
+if ! grep -q "claim-dra-claim-uid-01" /tmp/ggate_cdi_test/gpu.g-gate.io.json; then
+    echo "FAIL: Expected claim-dra-claim-uid-01 in /tmp/ggate_cdi_test/gpu.g-gate.io.json"
+    cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
+    exit 1
+fi
+echo "Verified CDI 0.6.0 spec generated at /tmp/ggate_cdi_test/gpu.g-gate.io.json:"
+cat /tmp/ggate_cdi_test/gpu.g-gate.io.json
+rm -rf /tmp/ggate_cdi_test
+
+echo "[PASS] Milestone 10 (v0.3) verified successfully (Kubernetes DRA ResourceClaim quota enforcement + CDI 0.6.0 spec generation with ZERO annotations)."
+
+kill -TERM "${AGENT_PID}"
+wait "${AGENT_PID}" 2>/dev/null || true
+AGENT_PID=""
+rmdir "${CGROUP_DRA}" 2>/dev/null || true
+
+echo "=========================================================="
+echo "ALL MILESTONES (1, 2, 3, 4, 5, 9, 10) VERIFIED SUCCESSFULLY!"
 echo "=========================================================="
