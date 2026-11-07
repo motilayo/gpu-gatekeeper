@@ -14,11 +14,12 @@ struct cgroup_quota_state {
     __u64 refill_rate_tokens_per_sec; /* Configured by Go agent / K8s annotations */
     __u64 max_burst_tokens;           /* Bucket capacity */
     __u64 current_tokens;             /* Updated in eBPF */
+    __u64 debt_tokens;                /* Unpaid token deficit across 10ms micro-pause slices */
     __u64 last_update_ns;             /* Updated via bpf_ktime_get_ns() */
     __u64 total_launches;             /* Kernel launch counter */
     __u64 total_throttled;            /* Throttle event counter */
     __u64 total_throttled_ns;         /* Cumulative throttling pause nanoseconds */
-    __u64 allocated_vram_bytes;       /* Updated by cuMemAlloc_v2 probe */
+    __u64 allocated_vram_bytes;       /* Updated by cuMemAlloc_v2 / cuMemAllocAsync probe */
     __u64 max_vram_bytes;             /* Configured VRAM quota in bytes (0 = unlimited) */
     __u64 vram_quota_exceeded;        /* Counter of allocations exceeding max_vram_bytes */
 };

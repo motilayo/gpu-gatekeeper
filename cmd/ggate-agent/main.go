@@ -6,12 +6,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,9 +40,33 @@ func (q *quotaList) Set(val string) error {
 	return nil
 }
 
+type wallPauseTracker struct {
+	mu         sync.RWMutex
+	nsByCgroup map[uint64]uint64
+}
+
+func newWallPauseTracker() *wallPauseTracker {
+	return &wallPauseTracker{
+		nsByCgroup: make(map[uint64]uint64),
+	}
+}
+
+func (t *wallPauseTracker) Add(cgroupID, ns uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.nsByCgroup[cgroupID] += ns
+}
+
+func (t *wallPauseTracker) Get(cgroupID uint64) uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.nsByCgroup[cgroupID]
+}
+
 type bpfCollector struct {
 	quotaMap            *ebpf.Map
 	resolver            *k8s.Resolver
+	pauseTracker        *wallPauseTracker
 	launchesDesc        *prometheus.Desc
 	throttledDesc       *prometheus.Desc
 	throttledSecDesc    *prometheus.Desc
@@ -49,11 +75,12 @@ type bpfCollector struct {
 	vramQuotaExceedDesc *prometheus.Desc
 }
 
-func newBPFCollector(quotaMap *ebpf.Map, resolver *k8s.Resolver) *bpfCollector {
+func newBPFCollector(quotaMap *ebpf.Map, resolver *k8s.Resolver, pauseTracker *wallPauseTracker) *bpfCollector {
 	labels := []string{"cgroup_id", "namespace", "pod", "container"}
 	return &bpfCollector{
-		quotaMap: quotaMap,
-		resolver: resolver,
+		quotaMap:     quotaMap,
+		resolver:     resolver,
+		pauseTracker: pauseTracker,
 		launchesDesc: prometheus.NewDesc(
 			"ggate_gpu_launches_total",
 			"Total number of GPU kernel launches intercepted",
@@ -111,6 +138,11 @@ func (c *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 		cgStr := strconv.FormatUint(cgroupID, 10)
 		meta := c.resolver.LookupMeta(cgroupID)
 
+		throttledNs := c.pauseTracker.Get(cgroupID)
+		if throttledNs < state.TotalThrottledNs {
+			throttledNs = state.TotalThrottledNs
+		}
+
 		ch <- prometheus.MustNewConstMetric(
 			c.launchesDesc,
 			prometheus.CounterValue,
@@ -126,7 +158,7 @@ func (c *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			c.throttledSecDesc,
 			prometheus.CounterValue,
-			float64(state.TotalThrottledNs)/1e9,
+			float64(throttledNs)/1e9,
 			cgStr, meta.Namespace, meta.Pod, meta.Container,
 		)
 		ch <- prometheus.MustNewConstMetric(
@@ -153,10 +185,46 @@ func (c *bpfCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
+func resolveLibcudaPath(configured string) (string, error) {
+	if configured != "" && configured != "auto" {
+		if _, err := os.Stat(configured); err == nil {
+			return configured, nil
+		}
+	}
+
+	candidates := []string{
+		"/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/run/nvidia/driver/usr/lib64/libcuda.so.1",
+		"/usr/local/nvidia/lib64/libcuda.so.1",
+		"/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+		"/lib/aarch64-linux-gnu/libcuda.so.1",
+		"/usr/lib64/libcuda.so.1",
+		"/proc/1/root/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/proc/1/root/run/nvidia/driver/usr/lib64/libcuda.so.1",
+		"/proc/1/root/usr/local/nvidia/lib64/libcuda.so.1",
+		"/proc/1/root/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/proc/1/root/lib/x86_64-linux-gnu/libcuda.so.1",
+		"/proc/1/root/usr/lib/aarch64-linux-gnu/libcuda.so.1",
+		"/proc/1/root/lib/aarch64-linux-gnu/libcuda.so.1",
+		"/proc/1/root/usr/lib64/libcuda.so.1",
+		"./build/libcuda.so",
+	}
+
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	return "", fmt.Errorf("no libcuda.so found in candidate search paths (configured: %q)", configured)
+}
+
 func main() {
 	var quotas quotaList
 	flag.Var(&quotas, "quota", "Cgroup quota in format target:refill_rate:max_burst (can be specified multiple times, target can be numeric inode or path/glob)")
-	libcudaPath := flag.String("libcuda", "./build/libcuda.so", "Path to libcuda.so mock library")
+	libcudaPath := flag.String("libcuda", "./build/libcuda.so", "Path to libcuda.so mock library or 'auto' for driver discovery")
 	metricsAddr := flag.String("metrics-addr", ":9090", "Prometheus metrics HTTP address")
 	kubeletPodsURL := flag.String("kubelet-pods-url", "", "HTTP URL returning Kubelet /pods JSON")
 	kubeletPodsFile := flag.String("kubelet-pods-file", "", "Path to local JSON file with Kubelet /pods format")
@@ -230,10 +298,17 @@ func main() {
 	go resolver.Start(resolverCtx, 100*time.Millisecond)
 	log.Printf("Started Kubernetes workload metadata resolver")
 
-	// Open executable and attach uprobes & uretprobes
-	ex, err := link.OpenExecutable(*libcudaPath)
+	// Resolve libcuda path with driver auto-discovery
+	resolvedLibcuda, err := resolveLibcudaPath(*libcudaPath)
 	if err != nil {
-		log.Fatalf("opening executable %s: %v", *libcudaPath, err)
+		log.Fatalf("resolving libcuda: %v", err)
+	}
+	log.Printf("Resolved libcuda path: %s", resolvedLibcuda)
+
+	// Open executable and attach uprobes & uretprobes
+	ex, err := link.OpenExecutable(resolvedLibcuda)
+	if err != nil {
+		log.Fatalf("opening executable %s: %v", resolvedLibcuda, err)
 	}
 
 	kpLaunch, err := ex.Uprobe("cuLaunchKernel", objs.HandleCuLaunchKernel, nil)
@@ -248,6 +323,14 @@ func main() {
 	} else {
 		defer kpLaunchEx.Close()
 		log.Printf("Successfully attached uprobe cuLaunchKernelEx")
+	}
+
+	kpGraph, err := ex.Uprobe("cuGraphLaunch", objs.HandleCuGraphLaunch, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uprobe cuGraphLaunch: %v", err)
+	} else {
+		defer kpGraph.Close()
+		log.Printf("Successfully attached uprobe cuGraphLaunch")
 	}
 
 	kpAlloc, err := ex.Uprobe("cuMemAlloc_v2", objs.HandleCuMemAlloc, nil)
@@ -268,7 +351,33 @@ func main() {
 	}
 	defer kpFree.Close()
 
-	log.Printf("Successfully attached probes to %s (cuLaunchKernel, cuLaunchKernelEx, cuMemAlloc_v2, cuMemAlloc_v2 ret, cuMemFree_v2)", *libcudaPath)
+	kpAllocAsync, err := ex.Uprobe("cuMemAllocAsync", objs.HandleCuMemAllocAsync, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uprobe cuMemAllocAsync: %v", err)
+	} else {
+		defer kpAllocAsync.Close()
+		log.Printf("Successfully attached uprobe cuMemAllocAsync")
+	}
+
+	kpAllocAsyncRet, err := ex.Uretprobe("cuMemAllocAsync", objs.HandleCuMemAllocAsyncRet, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uretprobe cuMemAllocAsync: %v", err)
+	} else {
+		defer kpAllocAsyncRet.Close()
+		log.Printf("Successfully attached uretprobe cuMemAllocAsync")
+	}
+
+	kpFreeAsync, err := ex.Uprobe("cuMemFreeAsync", objs.HandleCuMemFreeAsync, nil)
+	if err != nil {
+		log.Printf("warning: could not attach uprobe cuMemFreeAsync: %v", err)
+	} else {
+		defer kpFreeAsync.Close()
+		log.Printf("Successfully attached uprobe cuMemFreeAsync")
+	}
+
+	log.Printf("Successfully attached probes to %s (cuLaunchKernel, cuLaunchKernelEx, cuGraphLaunch, cuMemAlloc_v2, cuMemAllocAsync, cuMemFree_v2, cuMemFreeAsync)", resolvedLibcuda)
+
+	pauseTracker := newWallPauseTracker()
 
 	// Ring buffer consumer
 	rd, err := ringbuf.NewReader(objs.EventsRingbuf)
@@ -297,14 +406,16 @@ func main() {
 
 			pid := int(ev.Pid)
 			sleepDur := time.Duration(ev.RequestedSleepNs) * time.Nanosecond
+			pausedAt := time.Now()
 			time.AfterFunc(sleepDur, func() {
 				_ = syscall.Kill(pid, syscall.SIGCONT)
+				pauseTracker.Add(ev.CgroupID, uint64(time.Since(pausedAt).Nanoseconds()))
 			})
 		}
 	}()
 
-	// Register Prometheus metrics collector with K8s label resolver
-	collector := newBPFCollector(objs.CgroupQuotaMap, resolver)
+	// Register Prometheus metrics collector with K8s label resolver and wall pause tracker
+	collector := newBPFCollector(objs.CgroupQuotaMap, resolver, pauseTracker)
 	prometheus.MustRegister(collector)
 
 	mux := http.NewServeMux()

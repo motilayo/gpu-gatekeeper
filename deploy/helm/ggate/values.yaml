@@ -7,7 +7,7 @@ serviceAccount:
   create: true
   name: ggate-agent
 
-libcudaPath: /usr/lib/x86_64-linux-gnu/libcuda.so.1
+libcudaPath: auto
 kubeletPodsUrl: "https://127.0.0.1:10250/pods"
 metricsPort: 9090
 

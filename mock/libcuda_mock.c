@@ -33,6 +33,13 @@ CUresult cuLaunchKernelEx(const void *config,
     return CUDA_SUCCESS;
 }
 
+__attribute__((noinline, used, visibility("default")))
+CUresult cuGraphLaunch(void *hGraphExec, void *hStream)
+{
+    asm volatile("" : : : "memory");
+    return CUDA_SUCCESS;
+}
+
 static unsigned long long next_dptr = 0xdead0000ULL;
 
 __attribute__((noinline, used, visibility("default")))
@@ -47,6 +54,23 @@ CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize)
 
 __attribute__((noinline, used, visibility("default")))
 CUresult cuMemFree_v2(CUdeviceptr dptr)
+{
+    asm volatile("" : : : "memory");
+    return CUDA_SUCCESS;
+}
+
+__attribute__((noinline, used, visibility("default")))
+CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, void *hStream)
+{
+    asm volatile("" : : : "memory");
+    if (dptr) {
+        *dptr = __sync_fetch_and_add(&next_dptr, 0x10000ULL);
+    }
+    return CUDA_SUCCESS;
+}
+
+__attribute__((noinline, used, visibility("default")))
+CUresult cuMemFreeAsync(CUdeviceptr dptr, void *hStream)
 {
     asm volatile("" : : : "memory");
     return CUDA_SUCCESS;

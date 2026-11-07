@@ -69,7 +69,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/ggate-agent
-            - --libcuda=/host/usr/lib/x86_64-linux-gnu/libcuda.so.1
+            - --libcuda=auto
             - --metrics-addr=:9090
             - --kubelet-pods-url=https://127.0.0.1:10250/pods
           securityContext:
@@ -88,8 +88,8 @@ spec:
             - name: sys-fs-cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
-            - name: host-libcuda
-              mountPath: /host/usr/lib/x86_64-linux-gnu/libcuda.so.1
+            - name: nvidia-driver
+              mountPath: /run/nvidia/driver
               readOnly: true
           resources:
             limits:
@@ -102,6 +102,7 @@ spec:
         - name: sys-fs-cgroup
           hostPath:
             path: /sys/fs/cgroup
-        - name: host-libcuda
+        - name: nvidia-driver
           hostPath:
-            path: /usr/lib/x86_64-linux-gnu/libcuda.so.1
+            path: /run/nvidia/driver
+            type: DirectoryOrCreate

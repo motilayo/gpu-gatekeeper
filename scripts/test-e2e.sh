@@ -17,6 +17,7 @@ CGROUP_80="/sys/fs/cgroup/ggate-e2e-80"
 CGROUP_M2="/sys/fs/cgroup/ggate-e2e-m2"
 CGROUP_M4="/sys/fs/cgroup/ggate-e2e-m4"
 CGROUP_M5="/sys/fs/cgroup/kubepods-pod11111111_2222_3333_4444_555555555555-abcdef123456"
+CGROUP_M9="/sys/fs/cgroup/ggate-e2e-m9"
 
 cleanup() {
     echo "=== Running cleanup ==="
@@ -32,6 +33,7 @@ cleanup() {
     rmdir "${CGROUP_M2}" 2>/dev/null || true
     rmdir "${CGROUP_M4}" 2>/dev/null || true
     rmdir "${CGROUP_M5}" 2>/dev/null || true
+    rmdir "${CGROUP_M9}" 2>/dev/null || true
     rm -f /tmp/ggate_agent_*.log /tmp/sim_*.log /tmp/mock_kubelet_pods.json
 }
 trap cleanup EXIT
@@ -46,8 +48,11 @@ fi
 
 LAUNCH_SYM=$(nm -D build/libcuda.so | grep -w "cuLaunchKernel" || true)
 LAUNCH_EX_SYM=$(nm -D build/libcuda.so | grep -w "cuLaunchKernelEx" || true)
+GRAPH_SYM=$(nm -D build/libcuda.so | grep -w "cuGraphLaunch" || true)
 ALLOC_SYM=$(nm -D build/libcuda.so | grep -w "cuMemAlloc_v2" || true)
 FREE_SYM=$(nm -D build/libcuda.so | grep -w "cuMemFree_v2" || true)
+ALLOC_ASYNC_SYM=$(nm -D build/libcuda.so | grep -w "cuMemAllocAsync" || true)
+FREE_ASYNC_SYM=$(nm -D build/libcuda.so | grep -w "cuMemFreeAsync" || true)
 
 if [ -z "${LAUNCH_SYM}" ]; then
     echo "FAIL: cuLaunchKernel symbol missing from build/libcuda.so"
@@ -55,6 +60,10 @@ if [ -z "${LAUNCH_SYM}" ]; then
 fi
 if [ -z "${LAUNCH_EX_SYM}" ]; then
     echo "FAIL: cuLaunchKernelEx symbol missing from build/libcuda.so"
+    exit 1
+fi
+if [ -z "${GRAPH_SYM}" ]; then
+    echo "FAIL: cuGraphLaunch symbol missing from build/libcuda.so"
     exit 1
 fi
 if [ -z "${ALLOC_SYM}" ]; then
@@ -65,11 +74,22 @@ if [ -z "${FREE_SYM}" ]; then
     echo "FAIL: cuMemFree_v2 symbol missing from build/libcuda.so"
     exit 1
 fi
+if [ -z "${ALLOC_ASYNC_SYM}" ]; then
+    echo "FAIL: cuMemAllocAsync symbol missing from build/libcuda.so"
+    exit 1
+fi
+if [ -z "${FREE_ASYNC_SYM}" ]; then
+    echo "FAIL: cuMemFreeAsync symbol missing from build/libcuda.so"
+    exit 1
+fi
 
 echo "  -> Found: ${LAUNCH_SYM}"
 echo "  -> Found: ${LAUNCH_EX_SYM}"
+echo "  -> Found: ${GRAPH_SYM}"
 echo "  -> Found: ${ALLOC_SYM}"
 echo "  -> Found: ${FREE_SYM}"
+echo "  -> Found: ${ALLOC_ASYNC_SYM}"
+echo "  -> Found: ${FREE_ASYNC_SYM}"
 echo "[PASS] Milestone 1 verified successfully."
 
 echo "=========================================================="
@@ -407,5 +427,73 @@ rmdir "${CGROUP_M5}" 2>/dev/null || true
 rm -f /tmp/mock_kubelet_pods.json
 
 echo "=========================================================="
-echo "ALL MILESTONES (1, 2, 3, 4, 5) VERIFIED SUCCESSFULLY!"
+echo "Milestone 9 (v0.2): CUDA Graphs & Stream-Ordered Memory"
+echo "=========================================================="
+CGROUP_M9="/sys/fs/cgroup/ggate-e2e-m9"
+mkdir -p "${CGROUP_M9}"
+CGROUP_ID_M9=$(stat -c '%i' "${CGROUP_M9}")
+
+echo "Starting ggate-agent with --libcuda auto and --quota ${CGROUP_M9}:6400:64..."
+./build/ggate-agent \
+    --libcuda auto \
+    --metrics-addr :9090 \
+    --quota "${CGROUP_M9}:6400:64" \
+    > /tmp/ggate_agent_m9.log 2>&1 &
+AGENT_PID=$!
+
+READY=0
+for i in {1..50}; do
+    if curl -s http://localhost:9090/metrics >/dev/null 2>&1; then
+        READY=1
+        break
+    fi
+    sleep 0.1
+done
+if [ "${READY}" -ne 1 ]; then
+    echo "FAIL: ggate-agent failed to start for Milestone 9. Logs:"
+    cat /tmp/ggate_agent_m9.log
+    exit 1
+fi
+
+echo "Running workload_sim with -graph-launch, -async-vram, -free-on-exit inside ${CGROUP_M9}..."
+(echo $BASHPID > "${CGROUP_M9}/cgroup.procs" && ./build/workload_sim -n 200 -vram 67108864 -graph-launch -async-vram -free-on-exit) > /tmp/sim_m9.log 2>&1
+cat /tmp/sim_m9.log
+
+sleep 0.2
+METRICS=$(curl -s http://localhost:9090/metrics)
+echo "Scraped Milestone 9 metrics:"
+echo "${METRICS}" | grep -E "ggate_(gpu_launches|gpu_throttled|vram)" | grep "cgroup_id=\"${CGROUP_ID_M9}\"" || true
+
+LAUNCHES_M9=$(echo "${METRICS}" | grep "^ggate_gpu_launches_total{cgroup_id=\"${CGROUP_ID_M9}\".*}" | awk '{print $2}')
+VRAM_M9=$(echo "${METRICS}" | grep "^ggate_vram_allocated_bytes{cgroup_id=\"${CGROUP_ID_M9}\".*}" | awk '{print $2}')
+THROTTLED_SEC_M9=$(echo "${METRICS}" | grep "^ggate_gpu_throttled_seconds_total{cgroup_id=\"${CGROUP_ID_M9}\".*}" | awk '{print $2}')
+
+echo "Launches: ${LAUNCHES_M9:-0} (expected 200)"
+echo "Allocated VRAM: ${VRAM_M9:-0} (expected 0 after cuMemFreeAsync)"
+echo "Throttled seconds: ${THROTTLED_SEC_M9:-0} (expected > 0)"
+
+if [ "${LAUNCHES_M9}" != "200" ]; then
+    echo "FAIL: Expected ggate_gpu_launches_total == 200, got '${LAUNCHES_M9}'"
+    exit 1
+fi
+
+if [ "${VRAM_M9}" != "0" ]; then
+    echo "FAIL: Expected ggate_vram_allocated_bytes == 0 after cuMemFreeAsync, got '${VRAM_M9}'"
+    exit 1
+fi
+
+if ! awk -v sec="${THROTTLED_SEC_M9:-0}" 'BEGIN { exit !(sec > 0) }'; then
+    echo "FAIL: Expected ggate_gpu_throttled_seconds_total > 0, got '${THROTTLED_SEC_M9}'"
+    exit 1
+fi
+
+echo "[PASS] Milestone 9 (v0.2) verified successfully (cuGraphLaunch, cuMemAllocAsync, cuMemFreeAsync, --libcuda auto)."
+
+kill -TERM "${AGENT_PID}"
+wait "${AGENT_PID}" 2>/dev/null || true
+AGENT_PID=""
+rmdir "${CGROUP_M9}" 2>/dev/null || true
+
+echo "=========================================================="
+echo "ALL MILESTONES (1, 2, 3, 4, 5, 9) VERIFIED SUCCESSFULLY!"
 echo "=========================================================="

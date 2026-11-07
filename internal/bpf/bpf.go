@@ -9,6 +9,7 @@ type CgroupQuotaState struct {
 	RefillRateTokensPerSec uint64
 	MaxBurstTokens         uint64
 	CurrentTokens          uint64
+	DebtTokens             uint64
 	LastUpdateNs           uint64
 	TotalLaunches          uint64
 	TotalThrottled         uint64

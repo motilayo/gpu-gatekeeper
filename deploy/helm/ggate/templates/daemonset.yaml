@@ -79,7 +79,11 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /ggate-agent
+            {{- if eq .Values.libcudaPath "auto" }}
+            - --libcuda=auto
+            {{- else }}
             - --libcuda=/host{{ .Values.libcudaPath }}
+            {{- end }}
             - --metrics-addr=:{{ .Values.metricsPort }}
             {{- if .Values.kubeletPodsUrl }}
             - --kubelet-pods-url={{ .Values.kubeletPodsUrl }}
@@ -100,15 +104,26 @@ spec:
             - name: sys-fs-cgroup
               mountPath: /sys/fs/cgroup
               readOnly: true
+            - name: nvidia-driver
+              mountPath: /run/nvidia/driver
+              readOnly: true
+            {{- if ne .Values.libcudaPath "auto" }}
             - name: host-libcuda
               mountPath: /host{{ .Values.libcudaPath }}
               readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
         - name: sys-fs-cgroup
           hostPath:
             path: /sys/fs/cgroup
+        - name: nvidia-driver
+          hostPath:
+            path: /run/nvidia/driver
+            type: DirectoryOrCreate
+        {{- if ne .Values.libcudaPath "auto" }}
         - name: host-libcuda
           hostPath:
             path: {{ .Values.libcudaPath }}
+        {{- end }}

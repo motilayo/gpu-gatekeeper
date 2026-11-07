@@ -24,8 +24,11 @@ extern CUresult cuLaunchKernel(CUfunction f,
                                void **kernelParams,
                                void **extra);
 
+extern CUresult cuGraphLaunch(void *hGraphExec, void *hStream);
 extern CUresult cuMemAlloc_v2(CUdeviceptr *dptr, size_t bytesize);
 extern CUresult cuMemFree_v2(CUdeviceptr dptr);
+extern CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, void *hStream);
+extern CUresult cuMemFreeAsync(CUdeviceptr dptr, void *hStream);
 
 static unsigned long long get_cgroup_id(void) {
     FILE *fp = fopen("/proc/self/cgroup", "r");
@@ -62,6 +65,8 @@ int main(int argc, char *argv[]) {
     unsigned int grid_x = 128;
     unsigned int block_x = 256;
     int free_on_exit = 0;
+    int use_graph_launch = 0;
+    int use_async_vram = 0;
 
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--n") == 0) && i + 1 < argc) {
@@ -76,6 +81,10 @@ int main(int argc, char *argv[]) {
             block_x = (unsigned int)strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "-free-on-exit") == 0 || strcmp(argv[i], "--free-on-exit") == 0) {
             free_on_exit = 1;
+        } else if (strcmp(argv[i], "-graph-launch") == 0 || strcmp(argv[i], "--graph-launch") == 0) {
+            use_graph_launch = 1;
+        } else if (strcmp(argv[i], "-async-vram") == 0 || strcmp(argv[i], "--async-vram") == 0) {
+            use_async_vram = 1;
         }
     }
 
@@ -87,7 +96,11 @@ int main(int argc, char *argv[]) {
 
     /* Allocate VRAM once before kernel launches */
     CUdeviceptr dptr = 0;
-    cuMemAlloc_v2(&dptr, vram_bytes);
+    if (use_async_vram) {
+        cuMemAllocAsync(&dptr, vram_bytes, NULL);
+    } else {
+        cuMemAlloc_v2(&dptr, vram_bytes);
+    }
 
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -95,7 +108,11 @@ int main(int argc, char *argv[]) {
     unsigned long long launches = 0;
     if (duration > 0.0) {
         while (1) {
-            cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            if (use_graph_launch) {
+                cuGraphLaunch((void *)0x1, NULL);
+            } else {
+                cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            }
             launches++;
 
             struct timespec current;
@@ -108,7 +125,11 @@ int main(int argc, char *argv[]) {
         }
     } else {
         for (unsigned long long i = 0; i < iterations; i++) {
-            cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            if (use_graph_launch) {
+                cuGraphLaunch((void *)0x1, NULL);
+            } else {
+                cuLaunchKernel((CUfunction)0x1, grid_x, 1, 1, block_x, 1, 1, 0, NULL, NULL, NULL);
+            }
             launches++;
         }
     }
@@ -116,7 +137,11 @@ int main(int argc, char *argv[]) {
     clock_gettime(CLOCK_MONOTONIC, &end);
 
     if (free_on_exit) {
-        cuMemFree_v2(dptr);
+        if (use_async_vram) {
+            cuMemFreeAsync(dptr, NULL);
+        } else {
+            cuMemFree_v2(dptr);
+        }
     }
 
     double elapsed_sec = (double)(end.tv_sec - start.tv_sec) +
